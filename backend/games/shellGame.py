@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import base64
+import concurrent.futures
 
 # Define color range for white cups in HSV
 white_lower = np.array([0, 0, 200])  # Lower HSV for white (low saturation, high value)
@@ -11,10 +12,8 @@ ball_lower = np.array([35, 100, 100])  # Lower HSV for green
 ball_upper = np.array([85, 255, 255])  # Upper HSV for green
 
 def create_tracker():
-    # Try legacy API first (OpenCV >=4.5.1 with contrib)
     if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerCSRT_create"):
         return cv2.legacy.TrackerCSRT_create()
-    # Try main API (older OpenCV or some builds)
     if hasattr(cv2, "TrackerCSRT_create"):
         return cv2.TrackerCSRT_create()
     raise RuntimeError("CSRT tracker not available in your OpenCV installation.")
@@ -41,7 +40,6 @@ class GameSession:
         mask = cv2.erode(mask, None, iterations=2)
         mask = cv2.dilate(mask, None, iterations=2)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         cups = []
         for contour in contours:
             area = cv2.contourArea(contour)
@@ -50,7 +48,6 @@ class GameSession:
                 center = (int(x), int(y))
                 radius = int(radius)
                 cups.append((center, radius))
-
         # Sort cups by x-coordinate and select the top 3
         cups = sorted(cups, key=lambda x: x[0][0])[:3]
         return cups
@@ -102,6 +99,7 @@ class GameSession:
         frame = cv2.resize(frame, (640, 480))
         raw_frame = frame.copy()
 
+        # Detect cups and initialize tracker if not already done
         if self.multi_tracker is None:
             cups = self.detect_cups(frame)
             if len(cups) == 3:
@@ -113,7 +111,6 @@ class GameSession:
                     tracker = create_tracker()
                     self.multi_tracker.add(tracker, frame, bbox)
             else:
-                # Return raw and processed (same as raw) if not ready
                 _, raw_jpg = cv2.imencode('.jpg', raw_frame)
                 raw_b64 = base64.b64encode(raw_jpg).decode("utf-8")
                 return {
@@ -123,14 +120,10 @@ class GameSession:
                     "processed_frame": raw_b64,
                 }
 
+        # Update cup positions
         success, boxes = self.multi_tracker.update(frame)
         ball_position = self.detect_ball(frame)
         self.ball_position = ball_position
-        cup_circles = [
-            ((int(x + w / 2), int(y + h / 2)), int((w + h) / 4))
-            for (x, y, w, h) in boxes
-        ]
-        ball_under_cup_idx = self.check_ball_under_cup(ball_position, cup_circles)
 
         # Draw overlays on processed frame
         if ball_position:
@@ -144,6 +137,10 @@ class GameSession:
                 (0, 0, 255),
                 2,
             )
+        cup_circles = [
+            ((int(x + w / 2), int(y + h / 2)), int((w + h) / 4))
+            for (x, y, w, h) in boxes
+        ]
         if success:
             for i, (x, y, w, h) in enumerate(boxes):
                 center = (int(x + w / 2), int(y + h / 2))
@@ -158,7 +155,10 @@ class GameSession:
                     (255, 255, 255),
                     2,
                 )
-        if ball_under_cup_idx is not None and ball_position is None:
+
+        # Determine which cup has the ball
+        ball_under_cup_idx = self.check_ball_under_cup(ball_position, cup_circles)
+        if ball_under_cup_idx is not None and ball_position is None and len(boxes) > ball_under_cup_idx:
             x, y, w, h = [int(v) for v in boxes[ball_under_cup_idx]]
             center = (int(x + w / 2), int(y + h / 2))
             cv2.putText(

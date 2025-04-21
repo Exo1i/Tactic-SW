@@ -3,5 +3,5 @@ uvicorn
 opencv-python
 numpy
 websockets
-opencv-python
+opencv-contrib-python
 pygame
