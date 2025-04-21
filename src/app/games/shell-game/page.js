@@ -1,10 +1,9 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
-import { use } from "react";
 import { initializeVideoSource } from "@/utils/cameraUtils";
 
-export default function GamePage({ params }) {
-  const { gameId } = use(params);
+export default function ShellGamePage() {
+  const gameId = "shell-game";
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);

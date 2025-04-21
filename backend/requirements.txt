@@ -5,3 +5,6 @@ numpy
 websockets
 opencv-contrib-python
 pygame
+keras
+pillow
+tensorflow

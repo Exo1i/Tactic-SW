@@ -3,6 +3,7 @@ import { useRouter } from "next/navigation";
 
 const games = [
   { name: "Shell Game", id: "shell-game" },
+  { name: "Tic Tac Toe", id: "tic-tac-toe" },
   { name: "Game 2", id: "game-2" },
   { name: "Game 3", id: "game-3" },
   { name: "Game 4", id: "game-4" },

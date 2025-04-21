@@ -2,6 +2,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import importlib
+import sys
+import os
 
 app = FastAPI()
 
@@ -13,9 +15,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Ensure backend/games/tic-tac-toe is in sys.path for dynamic imports (for 'utils', 'alphabeta', etc.)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TICTACTOE_DIR = os.path.join(BASE_DIR, "games", "tic-tac-toe")
+if TICTACTOE_DIR not in sys.path:
+    sys.path.insert(0, TICTACTOE_DIR)
+
 # Map game_id to module path
 GAME_MODULES = {
     "shell-game": "games.shellGame",
+    "tic-tac-toe": "games.tic-tac-toe.tictactoe",
     "game-2": "games.game2",   # Placeholder, implement games/game2.py
     "game-3": "games.game3",   # Placeholder, implement games/game3.py
     "game-4": "games.game4",   # Placeholder, implement games/game4.py
@@ -31,7 +40,14 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
     if module_path:
         try:
             game_module = importlib.import_module(module_path)
-            game_session = game_module.GameSession()
+            # For tic-tac-toe, allow passing arguments via query params or initial message
+            if game_id == "tic-tac-toe":
+                # Wait for initial config message
+                config = await websocket.receive_json()
+                # Example: {"model": "...", "zoom": 2.0, "check_interval": 5.0}
+                game_session = game_module.GameSession(config)
+            else:
+                game_session = game_module.GameSession()
         except Exception as e:
             await websocket.send_json({"status": "error", "message": f"Failed to load game: {e}"})
             await websocket.close()
