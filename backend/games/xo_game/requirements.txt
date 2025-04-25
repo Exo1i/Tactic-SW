@@ -1,0 +1,6 @@
+# Requires Python >=3.10
+keras
+numpy
+pillow
+opencv-contrib-python>=4.8.0
+tensorflow
