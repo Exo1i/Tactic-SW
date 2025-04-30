@@ -5,6 +5,9 @@ import importlib
 import sys
 import os
 
+# Import memory matching backend for color/yolo WebSocket endpoints
+from games import memory_matching_backend
+
 app = FastAPI()
 
 # Allow frontend dev server
@@ -67,6 +70,15 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             await websocket.send_json(result)
     except WebSocketDisconnect:
         pass
+
+# Add endpoints for memory matching game (color and yolo)
+@app.websocket("/ws/memory-matching/color")
+async def ws_memory_matching_color(websocket: WebSocket):
+    await memory_matching_backend.stream_game(websocket, "color")
+
+@app.websocket("/ws/memory-matching/yolo")
+async def ws_memory_matching_yolo(websocket: WebSocket):
+    await memory_matching_backend.stream_game(websocket, "yolo")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
