@@ -1,6 +1,6 @@
 "use client";
 import React, {useCallback, useEffect, useRef, useState} from 'react';
-import "../../../index.css";
+import "../../globals.css";
 
 // --- Constants ---
 const GRID_ROWS = 2;
