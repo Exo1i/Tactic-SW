@@ -8,6 +8,7 @@ import json
 import base64
 import os
 import random
+from collections import Counter
 
 class RubiksCubeGame:
     def __init__(self, config: Dict[str, Any] = None):
@@ -27,9 +28,9 @@ class RubiksCubeGame:
         
         # Constants
         self.WINDOW_SIZE = (640, 480)
-        self.SCAN_COOLDOWN = 0.5
-        self.MOTOR_STABILIZATION_TIME = 0.5
-        self.STABILITY_THRESHOLD = 1
+        self.SCAN_COOLDOWN = 1
+        self.MOTOR_STABILIZATION_TIME = 1
+        self.STABILITY_THRESHOLD = 3
         self.MIN_CONTOUR_AREA = 4000
         self.MAX_CONTOUR_AREA = 60000
         self.COLOR_NAMES = ["W", "R", "G", "Y", "O", "B"]
@@ -63,10 +64,11 @@ class RubiksCubeGame:
         if not self.color_ranges:
             self.color_ranges = {
                 "W": (np.array([0, 0, 200]), np.array([180, 30, 255])),      # White
-                "R": (np.array([170, 120, 70]), np.array([180, 255, 255])),  # Red
-                "G": (np.array([35, 50, 50]), np.array([85, 255, 255])),     # Green
-                "Y": (np.array([20, 100, 100]), np.array([30, 255, 255])),   # Yellow
-                "O": (np.array([5, 150, 150]), np.array([15, 255, 255])),    # Orange
+                "R": [(np.array([0, 150, 100]), np.array([10, 255, 255])),   # Red (lower range)
+                     (np.array([170, 150, 100]), np.array([180, 255, 255]))], # Red (upper range)
+                "G": (np.array([45, 50, 50]), np.array([85, 255, 255])),     # Green
+                "Y": (np.array([20, 100, 100]), np.array([35, 255, 255])),   # Yellow
+                "O": (np.array([5, 150, 150]), np.array([20, 255, 255])),    # Orange
                 "B": (np.array([100, 100, 50]), np.array([130, 255, 255]))   # Blue
             }
         
@@ -95,18 +97,48 @@ class RubiksCubeGame:
         """Send command to Arduino and wait for acknowledgment."""
         try:
             if self.serial_connection and self.serial_connection.is_open:
+                print(f"\nSending to Arduino: {cmd}")
                 self.serial_connection.write(f"{cmd}\n".encode())
                 self.serial_connection.flush()
-                # Wait for acknowledgment
+                
+                # Wait for acknowledgment with a longer timeout for solutions
+                start_time = time.time()
+                timeout = 30 if len(cmd.split()) > 10 else 10  # Longer timeout for solutions
+                
                 while True:
+                    if time.time() - start_time > timeout:
+                        print(f"Timeout waiting for Arduino response after {timeout} seconds")
+                        return False
+                    
                     if self.serial_connection.in_waiting:
                         response = self.serial_connection.readline().decode().strip()
+                        print(f"Arduino response: {response}")
+                        
+                        # For long solutions, keep reading until we get completion
                         if "completed" in response.lower() or "executed" in response.lower():
+                            print("Command execution completed")
+                            # Reset to idle mode after solution is complete
+                            if len(cmd.split()) > 10:  # If this was a solution
+                                print("Solution completed, resetting to idle mode")
+                                self.mode = "idle"
+                                self.status_message = "Solution completed - Ready for next command"
+                                self.current_solve_move_index = 0
+                                self.total_solve_moves = 0
+                                self.solution = None
                             return True
+                        elif "error" in response.lower():
+                            print(f"Arduino reported error: {response}")
+                            return False
+                    
+                    # Small delay to prevent busy waiting
                     time.sleep(0.1)
-            return False
+            else:
+                print("Serial connection not available")
+                return False
+                
         except Exception as e:
             self.error_message = f"Arduino command error: {str(e)}"
+            print(f"Error sending command: {e}")
             return False
     
     def load_color_ranges(self, filename="color_ranges.json"):
@@ -221,21 +253,33 @@ class RubiksCubeGame:
         # Create a clean copy for display
         display_frame = frame.copy()
         
-        # Smooth the frame to reduce noise
-        frame = cv2.GaussianBlur(frame, (5, 5), 0)
+        # Downsample frame for faster processing
+        small_frame = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2))
+        
+        # Smooth the frame to reduce noise (use smaller kernel for speed)
+        small_frame = cv2.GaussianBlur(small_frame, (3, 3), 0)
         
         # Color detection and cube processing code
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        combined_mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+        hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
+        combined_mask = np.zeros((small_frame.shape[0], small_frame.shape[1]), dtype=np.uint8)
         
         # Create mask for all colors more efficiently
-        for color, (lower, upper) in self.color_ranges.items():
-            mask = cv2.inRange(hsv, lower, upper)
-            combined_mask = cv2.bitwise_or(combined_mask, mask)
+        for color, ranges in self.color_ranges.items():
+            if isinstance(ranges, list):  # Handle multiple ranges (for red)
+                for lower, upper in ranges:
+                    mask = cv2.inRange(hsv, lower, upper)
+                    combined_mask = cv2.bitwise_or(combined_mask, mask)
+            else:  # Single range for other colors
+                lower, upper = ranges
+                mask = cv2.inRange(hsv, lower, upper)
+                combined_mask = cv2.bitwise_or(combined_mask, mask)
         
-        # Clean up mask more aggressively
-        kernel = np.ones((5,5), np.uint8)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        # Scale mask back to original size
+        combined_mask = cv2.resize(combined_mask, (frame.shape[1], frame.shape[0]))
+        
+        # Clean up mask (use smaller kernel and fewer iterations)
+        kernel = np.ones((3,3), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         
         # Find contours with less detail for better stability
         contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -368,7 +412,18 @@ class RubiksCubeGame:
                         
                         # Check if all scans complete
                         if self.current_scan_idx >= 12:
-                            # Process solution
+                            # All scans complete, send final B F' and process solution
+                            print("\nAll scans completed! Processing solution...")
+                            print("\nSending final B F' command...")
+                            if not self.send_arduino_command("B F'"):
+                                self.mode = "error"
+                                self.error_message = "Failed to execute final B F' command"
+                                return False
+                            
+                            print("Waiting for motors to stabilize...")
+                            time.sleep(self.MOTOR_STABILIZATION_TIME)
+                            
+                            # Construct cube state and solve
                             cube_state = self.construct_cube_state()
                             if cube_state:
                                 solution = self.solve_cube(cube_state)
@@ -378,6 +433,7 @@ class RubiksCubeGame:
                                     self.current_solve_move_index = 0
                                     self.total_solve_moves = len(solution.split())
                                     self.status_message = "Solution found, executing moves"
+                                    print(f"\nSending solution command: SOLUTION:{solution}")
                                     self.send_arduino_command(solution)
                                 else:
                                     self.mode = "error"
@@ -486,7 +542,10 @@ class RubiksCubeGame:
         return False
     
     def detect_color(self, roi):
-        """Detect the dominant color in a region of interest (ROI)."""
+        """
+        Detect the dominant color in a region of interest (ROI) using multiple methods.
+        Returns the first letter of the color (e.g., 'R' for Red).
+        """
         if len(roi.shape) == 3 and roi.shape[2] == 3:
             if roi.dtype != np.uint8:
                 roi = np.uint8(roi)
@@ -495,17 +554,122 @@ class RubiksCubeGame:
             center_roi = roi[h//4:3*h//4, w//4:3*w//4]
             hsv_roi = cv2.cvtColor(center_roi, cv2.COLOR_BGR2HSV)
             
+            # Method 1: Range-based detection
             color_matches = {}
-            for color, (lower, upper) in self.color_ranges.items():
-                mask = cv2.inRange(hsv_roi, lower, upper)
-                match_percentage = cv2.countNonZero(mask) / (center_roi.shape[0] * center_roi.shape[1])
+            for color, ranges in self.color_ranges.items():
+                if isinstance(ranges, list):  # Handle multiple ranges (for red)
+                    match_percentage = 0
+                    for lower, upper in ranges:
+                        mask = cv2.inRange(hsv_roi, lower, upper)
+                        match_percentage += cv2.countNonZero(mask)
+                    match_percentage = match_percentage / (center_roi.shape[0] * center_roi.shape[1])
+                else:
+                    lower, upper = ranges
+                    mask = cv2.inRange(hsv_roi, lower, upper)
+                    match_percentage = cv2.countNonZero(mask) / (center_roi.shape[0] * center_roi.shape[1])
                 color_matches[color] = match_percentage * 100
             
-            best_color = max(color_matches, key=color_matches.get)
-            best_match = color_matches[best_color]
+            range_best_color = max(color_matches, key=color_matches.get)
+            range_best_match = color_matches[range_best_color]
             
-            if best_match > 10:
-                return best_color
+            # Method 2: Most common HSV value
+            pixels = hsv_roi.reshape((-1, 3))
+            pixel_list = [tuple(p) for p in pixels]
+            from collections import Counter
+            most_common_hsv = Counter(pixel_list).most_common(1)[0][0]
+            
+            # Find closest color center using weighted distances
+            dominant_color = None
+            min_distance = float('inf')
+            
+            for color, ranges in self.color_ranges.items():
+                if isinstance(ranges, list):
+                    # For red, use the closest range
+                    min_range_dist = float('inf')
+                    for lower, upper in ranges:
+                        middle_hsv = (lower + upper) / 2
+                        h_dist = min(abs(most_common_hsv[0] - middle_hsv[0]), 
+                                   180 - abs(most_common_hsv[0] - middle_hsv[0]))
+                        s_dist = abs(most_common_hsv[1] - middle_hsv[1])
+                        v_dist = abs(most_common_hsv[2] - middle_hsv[2])
+                        
+                        if color == "W":
+                            distance = 0.1 * h_dist + 0.3 * s_dist + 0.6 * v_dist
+                        else:
+                            distance = 0.6 * h_dist + 0.3 * s_dist + 0.1 * v_dist
+                        
+                        min_range_dist = min(min_range_dist, distance)
+                    
+                    if min_range_dist < min_distance:
+                        min_distance = min_range_dist
+                        dominant_color = color
+                else:
+                    lower, upper = ranges
+                    middle_hsv = (lower + upper) / 2
+                    h_dist = min(abs(most_common_hsv[0] - middle_hsv[0]), 
+                               180 - abs(most_common_hsv[0] - middle_hsv[0]))
+                    s_dist = abs(most_common_hsv[1] - middle_hsv[1])
+                    v_dist = abs(most_common_hsv[2] - middle_hsv[2])
+                    
+                    if color == "W":
+                        distance = 0.1 * h_dist + 0.3 * s_dist + 0.6 * v_dist
+                    else:
+                        distance = 0.6 * h_dist + 0.3 * s_dist + 0.1 * v_dist
+                    
+                    if distance < min_distance:
+                        min_distance = distance
+                        dominant_color = color
+            
+            # Decision making based on all methods
+            if range_best_match > 15:  # Strong match with range-based method
+                return range_best_color
+            elif dominant_color:  # Use dominant color if range-based method isn't confident
+                return dominant_color
+            
+            # Method 3: Average HSV (fallback)
+            avg_hsv = np.mean(hsv_roi, axis=(0,1))
+            closest_color = None
+            min_distance = float('inf')
+            
+            for color, ranges in self.color_ranges.items():
+                if isinstance(ranges, list):
+                    # For red, use the closest range
+                    min_range_dist = float('inf')
+                    for lower, upper in ranges:
+                        middle_hsv = (lower + upper) / 2
+                        h_dist = min(abs(avg_hsv[0] - middle_hsv[0]), 
+                                   180 - abs(avg_hsv[0] - middle_hsv[0]))
+                        s_dist = abs(avg_hsv[1] - middle_hsv[1])
+                        v_dist = abs(avg_hsv[2] - middle_hsv[2])
+                        
+                        if color == "W":
+                            distance = 0.1 * h_dist + 0.3 * s_dist + 0.6 * v_dist
+                        else:
+                            distance = 0.6 * h_dist + 0.3 * s_dist + 0.1 * v_dist
+                        
+                        min_range_dist = min(min_range_dist, distance)
+                    
+                    if min_range_dist < min_distance:
+                        min_distance = min_range_dist
+                        closest_color = color
+                else:
+                    lower, upper = ranges
+                    middle_hsv = (lower + upper) / 2
+                    h_dist = min(abs(avg_hsv[0] - middle_hsv[0]), 
+                               180 - abs(avg_hsv[0] - middle_hsv[0]))
+                    s_dist = abs(avg_hsv[1] - middle_hsv[1])
+                    v_dist = abs(avg_hsv[2] - middle_hsv[2])
+                    
+                    if color == "W":
+                        distance = 0.1 * h_dist + 0.3 * s_dist + 0.6 * v_dist
+                    else:
+                        distance = 0.6 * h_dist + 0.3 * s_dist + 0.1 * v_dist
+                    
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_color = color
+            
+            return closest_color
         
         return None
     
@@ -651,11 +815,23 @@ class RubiksCubeGame:
                 if self.current_scan_idx < len(rotation_sequence):
                     move = rotation_sequence[self.current_scan_idx]
                     if move:
+                        print(f"\nSending rotation command: {move}")
                         self.send_arduino_command(move)
                 
                 self.status_message = f"Scan {self.current_scan_idx + 1}/12 captured"
             else:
-                # All scans complete, construct cube state and solve
+                # All scans complete, send final B F' and process solution
+                print("\nAll scans completed! Processing solution...")
+                print("\nSending final B F' command...")
+                if not self.send_arduino_command("B F'"):
+                    self.mode = "error"
+                    self.error_message = "Failed to execute final B F' command"
+                    return False
+                
+                print("Waiting for motors to stabilize...")
+                time.sleep(self.MOTOR_STABILIZATION_TIME)
+                
+                # Construct cube state and solve
                 cube_state = self.construct_cube_state()
                 if cube_state:
                     solution = self.solve_cube(cube_state)
@@ -665,7 +841,8 @@ class RubiksCubeGame:
                         self.current_solve_move_index = 0
                         self.total_solve_moves = len(solution.split())
                         self.status_message = "Solution found, executing moves"
-                        self.send_arduino_command(f"SOLUTION:{solution}")
+                        print(f"\nSending solution command: SOLUTION:{solution}")
+                        self.send_arduino_command(solution)
                     else:
                         self.mode = "error"
                         self.error_message = "Could not find solution"
@@ -685,7 +862,6 @@ class RubiksCubeGame:
             return None
         
         cube_state = [''] * 54
-        # Set centers (fixed)
         cube_state[4] = 'B'   # F center
         cube_state[13] = 'O'  # R center
         cube_state[22] = 'G'  # B center
@@ -693,72 +869,288 @@ class RubiksCubeGame:
         cube_state[40] = 'W'  # U center
         cube_state[49] = 'Y'  # D center
         
-        # Map scanned faces to cube state
-        cube_state[36:45] = self.u_scans[0]  # First U face scan
+        cube_state[36:45] = self.u_scans[0]
+        for i in range(54):
+            if not cube_state[i]:
+                cube_state[i] = '-'
         
-        # Map remaining scans
-        scan_mappings = [
-            (1, [0,2,3,5,6,8]),  # Scan 2
-            (2, [9,10,11,15,16,17]),  # Scan 3
-            (3, [47,53,1,7,45,51]),  # Scan 4
-            (4, [24,12,18,26,14,20]),  # Scan 5
-            (5, [33,27,50,48,35,29]),  # Scan 6
-            (6, [36,46,38,42,52,44]),  # Scan 7
-            (7, [21,23]),  # Scan 8
-            (8, [34,28]),  # Scan 9
-            (9, [25,19]),  # Scan 10
-            (10, [30,32]),  # Scan 11
-            (11, [39,41])  # Scan 12
-        ]
+        cube_state[0] = self.u_scans[1][0]
+        cube_state[2] = self.u_scans[1][2]
+        cube_state[3] = self.u_scans[1][3]
+        cube_state[5] = self.u_scans[1][5]
+        cube_state[6] = self.u_scans[1][6]
+        cube_state[8] = self.u_scans[1][8]
         
-        for scan_idx, positions in scan_mappings:
-            scan = self.u_scans[scan_idx]
-            for i, pos in enumerate(positions):
-                cube_state[pos] = scan[i]
+        cube_state[9] = self.u_scans[2][0]
+        cube_state[10] = self.u_scans[2][1]
+        cube_state[11] = self.u_scans[2][2]
+        cube_state[15] = self.u_scans[2][6]
+        cube_state[16] = self.u_scans[2][7]
+        cube_state[17] = self.u_scans[2][8]
+        
+        cube_state[47] = self.u_scans[3][0]
+        cube_state[53] = self.u_scans[3][2]
+        cube_state[1] = self.u_scans[3][3]
+        cube_state[7] = self.u_scans[3][5]
+        cube_state[45] = self.u_scans[3][6]
+        cube_state[51] = self.u_scans[3][8]
+        
+        cube_state[24] = self.u_scans[4][0]
+        cube_state[12] = self.u_scans[4][1]
+        cube_state[18] = self.u_scans[4][2]
+        cube_state[26] = self.u_scans[4][6]
+        cube_state[14] = self.u_scans[4][7]
+        cube_state[20] = self.u_scans[4][8]
+        
+        cube_state[33] = self.u_scans[5][0]
+        cube_state[27] = self.u_scans[5][2]
+        cube_state[50] = self.u_scans[5][3]
+        cube_state[48] = self.u_scans[5][5]
+        cube_state[35] = self.u_scans[5][6]
+        cube_state[29] = self.u_scans[5][8]
+        
+        cube_state[36] = self.u_scans[6][0]
+        cube_state[46] = self.u_scans[6][1]
+        cube_state[38] = self.u_scans[6][2]
+        cube_state[42] = self.u_scans[6][6]
+        cube_state[52] = self.u_scans[6][7]
+        cube_state[44] = self.u_scans[6][8]
+        
+        cube_state[21] = self.u_scans[7][3]
+        cube_state[23] = self.u_scans[7][5]
+        
+        cube_state[34] = self.u_scans[8][1]
+        cube_state[28] = self.u_scans[8][7]
+        
+        cube_state[25] = self.u_scans[9][3]
+        cube_state[19] = self.u_scans[9][5]
+        
+        cube_state[30] = self.u_scans[10][1]
+        cube_state[32] = self.u_scans[10][7]
+        
+        cube_state[39] = self.u_scans[11][3]
+        cube_state[41] = self.u_scans[11][5]
+        
+        # Print the cube state for debugging
+        print("\nConstructed Cube State:")
+        print("Color mapping: W=White, R=Red, G=Green, Y=Yellow, O=Orange, B=Blue")
+        print("\nRaw state:", ''.join(cube_state))
+        print("\nVisual representation:")
+        # Print Up face
+        for i in range(3):
+            start = 36 + i*3  # Up face starts at index 36
+            print("        " + " ".join(cube_state[start:start+3]))
+        # Print middle faces (Front, Right, Back, Left)
+        for i in range(3):
+            line = ""
+            for face_start in [0, 9, 18, 27]:  # F, R, B, L
+                start = face_start + i*3
+                line += " ".join(cube_state[start:start+3]) + " | "
+            print(line[:-3])
+        # Print Down face
+        for i in range(3):
+            start = 45 + i*3  # Down face starts at index 45
+            print("        " + " ".join(cube_state[start:start+3]))
         
         return ''.join(cube_state)
     
-    def solve_cube(self, cube_state: str) -> Optional[str]:
+    def print_cube_state(self, cube_state: str):
+        """Print the cube state in a visual format."""
+        print("\nCube State:")
+        print("Color mapping: W=White, R=Red, G=Green, Y=Yellow, O=Orange, B=Blue")
+        print("\nVisual representation:")
+        # Print Up face
+        for i in range(3):
+            start = 36 + i*3  # Up face starts at index 36
+            print("        " + " ".join(cube_state[start:start+3]))
+        # Print middle faces (Front, Right, Back, Left)
+        for i in range(3):
+            line = ""
+            for face_start in [0, 9, 18, 27]:  # F, R, B, L
+                start = face_start + i*3
+                line += " ".join(cube_state[start:start+3]) + " | "
+            print(line[:-3])
+        # Print Down face
+        for i in range(3):
+            start = 45 + i*3  # Down face starts at index 45
+            print("        " + " ".join(cube_state[start:start+3]))
+    
+    def validate_cube(self, cube, order_name):
+        if len(cube) != 54:
+            raise ValueError(f"{order_name} must be 54 characters")
+        counts = Counter(cube)
+        if len(counts) != 6 or any(count != 9 for count in counts.values()):
+            raise ValueError(f"{order_name} invalid: {counts} (need 9 of each of 6 colors)")
+
+    def remap_colors_to_kociemba(self, cube_frblud):
+        self.validate_cube(cube_frblud, "FRBLUD")
+        centers = [cube_frblud[i] for i in [4, 13, 22, 31, 40, 49]]  # F, R, B, L, U, D
+        color_map = {
+            centers[4]: 'U',  # Up
+            centers[1]: 'R',  # Right
+            centers[0]: 'F',  # Front
+            centers[5]: 'D',  # Down
+            centers[3]: 'L',  # Left
+            centers[2]: 'B'   # Back
+        }
+        return color_map, ''.join(color_map[c] for c in cube_frblud)
+
+    def remap_cube_to_kociemba(self, cube_frblud_remapped):
+        front, right, back, left, up, down = [cube_frblud_remapped[i:i+9] for i in range(0, 54, 9)]
+        return up + right + front + down + left + back
+
+    def get_solved_state(self, cube_frblud, color_map):
+        centers = [cube_frblud[i] for i in [4, 13, 22, 31, 40, 49]]  # F, R, B, L, U, D
+        return ''.join(c * 9 for c in centers)
+
+    def is_cube_solved(self, cube_state):
+        """Check if the cube is already solved by verifying each face has the same color."""
+        # Check each face (9 stickers per face)
+        for i in range(0, 54, 9):
+            face = cube_state[i:i+9]
+            # If any sticker is different from the center of the face, cube is not solved
+            if not all(sticker == face[4] for sticker in face):
+                return False
+        return True
+
+    def simplify_cube_moves(self, moves_str):
+        # Split the string into individual moves
+        moves = moves_str.strip().split()
+        
+        # Function to get the net effect of a single move
+        def move_value(move):
+            if move.endswith("2"):
+                return 2
+            elif move.endswith("'"):
+                return -1
+            return 1
+        
+        # Function to convert net value back to move notation
+        def value_to_move(face, value):
+            value = value % 4
+            if value == 0:
+                return None
+            elif value == 1:
+                return face
+            elif value == 2:
+                return face + "2"
+            elif value == 3:
+                return face + "'"
+        
+        # Process moves for each face type
+        face_groups = [['L', 'R'], ['F', 'B'], ['U', 'D']]
+        
+        # First pass: Combine consecutive moves of the same face
+        i = 0
+        simplified = []
+        while i < len(moves):
+            current_face = moves[i][0]
+            current_value = move_value(moves[i])
+            
+            # Look ahead for same face moves
+            j = i + 1
+            while j < len(moves) and moves[j][0] == current_face:
+                current_value += move_value(moves[j])
+                j += 1
+                
+            # Add the simplified move if needed
+            move = value_to_move(current_face, current_value)
+            if move:
+                simplified.append(move)
+                
+            i = j
+        
+        # Second pass: Combine moves by face groups
+        final_simplified = []
+        i = 0
+        while i < len(simplified):
+            current_face = simplified[i][0]
+            
+            # Find which group this face belongs to
+            face_group = None
+            for group in face_groups:
+                if current_face in group:
+                    face_group = group
+                    break
+            
+            if face_group:
+                # Count moves for each face in this group
+                counts = {face: 0 for face in face_group}
+                j = i
+                
+                # Collect consecutive moves in this group
+                while j < len(simplified) and simplified[j][0] in face_group:
+                    face = simplified[j][0]
+                    counts[face] += move_value(simplified[j])
+                    j += 1
+                    
+                # Add simplified moves for this group
+                for face in face_group:
+                    move = value_to_move(face, counts[face])
+                    if move:
+                        final_simplified.append(move)
+                        
+                i = j
+            else:
+                # For faces not in any group (which shouldn't happen with standard cube notation)
+                final_simplified.append(simplified[i])
+                i += 1
+        
+        return " ".join(final_simplified) if final_simplified else "No moves"
+
+    def solve_cube(self, cube_frblud):
         """Solve the cube using kociemba algorithm."""
         try:
-            # Validate cube state
-            if len(cube_state) != 54:
-                raise ValueError(f"Invalid cube state length: {len(cube_state)}")
-            if not all(c in self.COLOR_NAMES for c in cube_state):
-                raise ValueError(f"Invalid colors in cube state")
+            # First check if cube is already solved
+            if self.is_cube_solved(cube_frblud):
+                print("\nCube is already solved! No moves needed.")
+                return ""
+                
+            # If not solved, proceed with normal solving process
+            color_map, cube_frblud_remapped = self.remap_colors_to_kociemba(cube_frblud)
+            scrambled_kociemba = self.remap_cube_to_kociemba(cube_frblud_remapped)
+            solved_frblud = self.get_solved_state(cube_frblud, color_map)
+            _, solved_frblud_remapped = self.remap_colors_to_kociemba(solved_frblud)
+            solved_kociemba = self.remap_cube_to_kociemba(solved_frblud_remapped)
             
-            # Convert color notation to kociemba notation
-            color_to_face = {
-                'W': 'U',  # White is Up
-                'R': 'R',  # Red is Right
-                'G': 'F',  # Green is Front
-                'Y': 'D',  # Yellow is Down
-                'O': 'L',  # Orange is Left
-                'B': 'B'   # Blue is Back
-            }
-            kociemba_state = ''.join(color_to_face[c] for c in cube_state)
+            print("\nValidating cube states...")
+            self.validate_cube(scrambled_kociemba, "Scrambled Kociemba")
+            self.validate_cube(solved_kociemba, "Solved Kociemba")
             
-            # Get solution
-            solution = kociemba.solve(kociemba_state)
-            if not solution:
-                return None
+            print("\nScrambled Kociemba state:", scrambled_kociemba)
+            print("Solved Kociemba state:", solved_kociemba)
             
-            # Replace U moves with alternative sequences
+            print("\nAttempting to solve with kociemba...")
+            solution = kociemba.solve(scrambled_kociemba, solved_kociemba)
+            print("Raw solution from kociemba:", solution)
+            
+            u_replacement = "R L F2 B2 R' L' D R L F2 B2 R' L'"
+            u_prime_replacement = "R L F2 B2 R' L' D' R L F2 B2 R' L'"
+            u2_replacement = "R L F2 B2 R' L' D2 R L F2 B2 R' L'"
+            
             moves = solution.split()
             modified_solution = []
             for move in moves:
                 if move == "U":
-                    modified_solution.append("R L F2 B2 R' L' D R L F2 B2 R' L'")
+                    modified_solution.append(u_replacement)
                 elif move == "U'":
-                    modified_solution.append("R L F2 B2 R' L' D' R L F2 B2 R' L'")
+                    modified_solution.append(u_prime_replacement)
                 elif move == "U2":
-                    modified_solution.append("R L F2 B2 R' L' D2 R L F2 B2 R' L'")
+                    modified_solution.append(u2_replacement)
                 else:
                     modified_solution.append(move)
             
-            return " ".join(modified_solution)
+            final_solution = " ".join(modified_solution)
             
+            # Optimize the solution using simplify_cube_moves
+            optimized_solution = self.simplify_cube_moves(final_solution)
+            print("\nOriginal solution length:", len(final_solution.split()))
+            print("Optimized solution length:", len(optimized_solution.split()))
+            
+            return optimized_solution
+        
         except Exception as e:
+            print(f"\nError in solve_cube: {str(e)}")
             self.error_message = f"Solve error: {str(e)}"
             return None
     
@@ -783,14 +1175,22 @@ class RubiksCubeGame:
                 last_face = face
             
             scramble_sequence = " ".join(scramble)
+            self.mode = "scrambling"
             self.status_message = "Executing scramble sequence"
+            self.current_solve_move_index = 0
+            self.total_solve_moves = len(scramble)
             
             # Send scramble to Arduino and wait for completion
-            self.send_arduino_command(scramble_sequence)
+            if not self.send_arduino_command(scramble_sequence):
+                self.mode = "error"
+                self.error_message = "Failed to execute scramble sequence"
+                return False
             
             # Return to idle mode
             self.mode = "idle"
-            self.status_message = "Scramble completed"
+            self.status_message = "Scramble completed - Ready for next command"
+            self.current_solve_move_index = 0
+            self.total_solve_moves = 0
             return True
             
         except Exception as e:
