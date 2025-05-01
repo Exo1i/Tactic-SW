@@ -1,6 +1,6 @@
 // app/page.jsx
 "use client";
-import React, { useState, useRef, useEffect, useCallback } from "react"; // Import useCallback
+import React, {useCallback, useEffect, useRef, useState} from "react"; // Import useCallback
 
 // Helper constant
 const COLOR_NAMES = ["W", "R", "G", "Y", "O", "B"];
@@ -34,6 +34,8 @@ export default function RubiksSolverPage() {
         useIpCamera: false,
         ipCameraUrl: "http://192.168.1.9:8080/video",
     });
+    const loadingTimeoutRef = useRef(null);
+
 
     const [isCameraLoading, setIsCameraLoading] = useState(true);
     const [isBackendProcessing, setIsBackendProcessing] = useState(false);
@@ -47,7 +49,7 @@ export default function RubiksSolverPage() {
     const initCamera = useCallback(async () => {
         console.log("initCamera called with settings:", appliedCameraSettings);
         setIsCameraLoading(true);
-        setStatus(prev => ({ ...prev, status_message: "Initializing camera...", error_message: null }));
+        setStatus(prev => ({...prev, status_message: "Initializing camera...", error_message: null}));
 
         if (videoRef.current && videoRef.current.srcObject) {
             console.log("Stopping previous camera stream.");
@@ -62,13 +64,18 @@ export default function RubiksSolverPage() {
             console.log("Attempting to use device camera...");
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 console.error("getUserMedia not supported!");
-                setStatus(prev => ({...prev, mode:"error", status_message:"Camera Error", error_message:"Browser does not support camera access (getUserMedia)."}));
+                setStatus(prev => ({
+                    ...prev,
+                    mode: "error",
+                    status_message: "Camera Error",
+                    error_message: "Browser does not support camera access (getUserMedia)."
+                }));
                 setIsCameraLoading(false);
                 return;
             }
             try {
                 const constraints = {
-                    video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'environment' },
+                    video: {width: {ideal: 640}, height: {ideal: 480}, facingMode: 'environment'},
                     audio: false,
                 };
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -91,18 +98,23 @@ export default function RubiksSolverPage() {
                 } else if (error.name === "NotReadableError") {
                     errorMsg = "Camera is already in use or hardware error.";
                 }
-                setStatus(prev => ({ ...prev, mode: "error", status_message: "Camera Error", error_message: errorMsg }));
+                setStatus(prev => ({...prev, mode: "error", status_message: "Camera Error", error_message: errorMsg}));
                 setIsCameraLoading(false);
             }
         } else {
             console.log("Using IP Camera:", appliedCameraSettings.ipCameraUrl);
             if (!appliedCameraSettings.ipCameraUrl) {
                 console.error("IP Camera URL is empty.");
-                setStatus(prev => ({...prev, mode:"error", status_message:"Camera Error", error_message:"IP Camera URL cannot be empty."}));
+                setStatus(prev => ({
+                    ...prev,
+                    mode: "error",
+                    status_message: "Camera Error",
+                    error_message: "IP Camera URL cannot be empty."
+                }));
                 setIsCameraLoading(false);
                 return;
             }
-            setStatus(prev => ({ ...prev, status_message: "Loading IP Camera feed..." }));
+            setStatus(prev => ({...prev, status_message: "Loading IP Camera feed..."}));
         }
     }, [appliedCameraSettings]);
 
@@ -132,7 +144,12 @@ export default function RubiksSolverPage() {
                 console.log("WebSocket Disconnected:", event.code, event.reason);
                 setWsConnectionStatus("Disconnected");
                 wsRef.current = null;
-                setStatus(prev => ({ ...prev, mode: "connecting", status_message: "Connection lost. Reconnecting...", serial_connected: false })); // Assume serial lost too
+                setStatus(prev => ({
+                    ...prev,
+                    mode: "connecting",
+                    status_message: "Connection lost. Reconnecting...",
+                    serial_connected: false
+                })); // Assume serial lost too
                 if (!stopped) {
                     if (reconnectTimeout) clearTimeout(reconnectTimeout);
                     reconnectTimeout = setTimeout(connectWebSocket, 5000);
@@ -145,30 +162,52 @@ export default function RubiksSolverPage() {
             };
 
             ws.onmessage = (event) => {
+                console.log("WS message received"); // Simple log to confirm receipt
+
+                // Clear any pending safety timeouts
+                if (loadingTimeoutRef.current) {
+                    clearTimeout(loadingTimeoutRef.current);
+                    loadingTimeoutRef.current = null;
+                }
+
+                // Reset processing flags
                 setIsBackendProcessing(false);
-                setIsActionLoading(false); // Reset action loading on any message
-                sendNextFrameRef.current = true;
+                setIsActionLoading(false); // Reset loading state upon ANY message
+                sendNextFrameRef.current = true; // Allow sending next frame
 
                 try {
                     const data = JSON.parse(event.data);
+                    console.log("WS data received, mode:", data.mode);
+
+                    // Update status as before
                     setStatus(prev => ({
                         ...prev,
-                        ...data,
-                        error_message: data.mode === 'error' ? data.error_message : null,
-                        solution: data.solution !== undefined ? data.solution : prev.solution
+                        mode: data.mode ?? prev.mode,
+                        status_message: data.status_message ?? prev.status_message,
+                        error_message: data.error_message ?? null,
+                        solution: data.solution ?? prev.solution,
+                        serial_connected: data.serial_connected ?? prev.serial_connected,
+                        calibration_step: data.calibration_step,
+                        current_color: data.current_color,
+                        scan_index: data.scan_index,
+                        solve_move_index: data.solve_move_index ?? 0,
+                        total_solve_moves: data.total_solve_moves ?? 0,
                     }));
+
                     if (data.processed_frame) {
-                        setProcessedFrame(`data:image/jpeg;base64,${data.processed_frame}`);
+                        const frameSrc = `data:image/jpeg;base64,${data.processed_frame}`;
+                        setProcessedFrame(frameSrc);
                     }
                 } catch (e) {
-                    console.error("Failed to parse WebSocket message:", e, "Data:", event.data);
+                    console.error("Failed to parse WS message:", e);
                     setStatus(prev => ({
                         ...prev,
                         mode: "error",
-                        error_message: "Received invalid data from backend."
+                        error_message: "Error processing backend update."
                     }));
                 }
             };
+
         };
 
         const sendFrame = () => {
@@ -223,11 +262,13 @@ export default function RubiksSolverPage() {
                             if (ws.readyState === WebSocket.OPEN) {
                                 ws.send(buffer);
                             } else {
-                                sendNextFrameRef.current = true; setIsBackendProcessing(false);
+                                sendNextFrameRef.current = true;
+                                setIsBackendProcessing(false);
                             }
                         }).catch(err => {
                             console.error("Error getting ArrayBuffer:", err);
-                            sendNextFrameRef.current = true; setIsBackendProcessing(false);
+                            sendNextFrameRef.current = true;
+                            setIsBackendProcessing(false);
                         });
                     } else {
                         sendNextFrameRef.current = true;
@@ -251,6 +292,7 @@ export default function RubiksSolverPage() {
             console.log("Running cleanup for RubiksSolverPage useEffect");
             if (frameRequestId) cancelAnimationFrame(frameRequestId);
             if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current);
             if (wsRef.current) {
                 console.log("Closing WebSocket connection.");
                 wsRef.current.close();
@@ -274,11 +316,28 @@ export default function RubiksSolverPage() {
             console.warn("Action already in progress, skipping call to", endpoint);
             return;
         }
+
+        // Clear any existing safety timeout
+        if (loadingTimeoutRef.current) {
+            clearTimeout(loadingTimeoutRef.current);
+        }
+
+        console.log(`Setting isActionLoading = true (callApi start: ${endpoint})`);
         setIsActionLoading(true);
+
+        // Set a safety timeout to reset loading state after 5 seconds
+        // This ensures UI doesn't get stuck if WebSocket fails to respond
+        loadingTimeoutRef.current = setTimeout(() => {
+            console.warn(`Safety timeout triggered for ${endpoint} - resetting loading state`);
+            setIsActionLoading(false);
+            setIsBackendProcessing(false);
+            loadingTimeoutRef.current = null;
+        }, 5000);
+
         try {
-            const options = { method };
+            const options = {method};
             if (body) {
-                options.headers = { 'Content-Type': 'application/json' };
+                options.headers = {'Content-Type': 'application/json'};
                 options.body = JSON.stringify(body);
             }
             const apiUrl = `http://${window.location.hostname}:8000${endpoint}`;
@@ -298,21 +357,22 @@ export default function RubiksSolverPage() {
             return data;
         } catch (error) {
             console.error(`API call to ${endpoint} failed:`, error);
+
+            // Clear the safety timeout since we're handling the error now
+            if (loadingTimeoutRef.current) {
+                clearTimeout(loadingTimeoutRef.current);
+                loadingTimeoutRef.current = null;
+            }
+
+            setIsActionLoading(false); // Reset loading state on error
             setStatus(prev => ({
                 ...prev,
                 mode: "error",
                 error_message: error.message || "API request failed."
             }));
-            // Reset loading on API error *only if WS doesn't handle it*
-            // Relying on WS is better, but add a safety timeout
-            setTimeout(() => {
-                if(isActionLoading){ setIsActionLoading(false) }
-            } , 2000); // Reset after 2s if WS hasn't already
             return null;
         }
-        // Removed finally block - rely on WS message to reset isActionLoading
-    }, [isActionLoading]); // Depend on isActionLoading
-
+    }, [isActionLoading]);
 
     // --- Button Click Handlers ---
     const handleStartCalibration = () => callApi('/start_calibration');
@@ -338,20 +398,25 @@ export default function RubiksSolverPage() {
         <div className="flex flex-col items-center gap-4 p-4 min-h-screen bg-gray-100 font-sans">
             {/* Settings Modal */}
             {showSettings && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 backdrop-blur-sm">
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40 backdrop-blur-sm">
                     <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md relative">
                         <button
                             className="absolute top-2 right-2 text-gray-500 hover:text-gray-800 text-2xl leading-none font-bold"
                             onClick={() => setShowSettings(false)}
                             aria-label="Close Settings"
-                        >×</button>
+                        >×
+                        </button>
                         <h3 className="text-lg font-medium mb-4 text-gray-800">Camera Settings</h3>
                         <div className="flex items-center mb-3">
                             <input
                                 type="checkbox"
                                 id="useIpCameraModal"
                                 checked={modalCameraSettings.useIpCamera}
-                                onChange={(e) => setModalCameraSettings({ ...modalCameraSettings, useIpCamera: e.target.checked })}
+                                onChange={(e) => setModalCameraSettings({
+                                    ...modalCameraSettings,
+                                    useIpCamera: e.target.checked
+                                })}
                                 className="mr-2 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                             />
                             <label htmlFor="useIpCameraModal" className="text-sm font-medium text-gray-700">
@@ -360,14 +425,18 @@ export default function RubiksSolverPage() {
                         </div>
                         {modalCameraSettings.useIpCamera && (
                             <div className="mb-4">
-                                <label htmlFor="ipCameraUrlModal" className="block mb-1 text-sm font-medium text-gray-700">
+                                <label htmlFor="ipCameraUrlModal"
+                                       className="block mb-1 text-sm font-medium text-gray-700">
                                     IP Camera URL:
                                 </label>
                                 <input
                                     type="text"
                                     id="ipCameraUrlModal"
                                     value={modalCameraSettings.ipCameraUrl}
-                                    onChange={(e) => setModalCameraSettings({ ...modalCameraSettings, ipCameraUrl: e.target.value })}
+                                    onChange={(e) => setModalCameraSettings({
+                                        ...modalCameraSettings,
+                                        ipCameraUrl: e.target.value
+                                    })}
                                     placeholder="http://camera-ip:port/stream"
                                     className="w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
                                 />
@@ -389,7 +458,8 @@ export default function RubiksSolverPage() {
             {/* Main Content Area */}
             <div className="w-full max-w-5xl bg-white rounded-xl shadow-lg p-6 mt-4">
                 {/* Header */}
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4 border-b border-gray-200 pb-4">
+                <div
+                    className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-4 border-b border-gray-200 pb-4">
                     <h1 className="text-2xl font-bold text-gray-800 mb-2 sm:mb-0">Rubik's Cube Solver</h1>
                     <div className="flex items-center gap-3">
                         <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
@@ -406,7 +476,10 @@ export default function RubiksSolverPage() {
                             {status.serial_connected ? "Serial OK" : "Serial disconnected"}
                          </span>
                         <button
-                            onClick={() => { setModalCameraSettings(appliedCameraSettings); setShowSettings(true); }}
+                            onClick={() => {
+                                setModalCameraSettings(appliedCameraSettings);
+                                setShowSettings(true);
+                            }}
                             className="px-3 py-1 bg-blue-500 text-white rounded-md hover:bg-blue-600 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                             aria-label="Open Camera Settings"
                         >
@@ -418,7 +491,8 @@ export default function RubiksSolverPage() {
                 {/* Status Display */}
                 <div className="mb-5 p-3 bg-gray-50 rounded-lg border border-gray-200 shadow-sm">
                     <p className="text-sm font-medium text-gray-700">
-                        Status: <span className={`font-semibold capitalize ${status.mode === 'error' ? 'text-red-600' : 'text-gray-900'}`}>{status.mode}</span>
+                        Status: <span
+                        className={`font-semibold capitalize ${status.mode === 'error' ? 'text-red-600' : 'text-gray-900'}`}>{status.mode}</span>
                         {(status.mode === 'solving' || status.mode === 'scrambling') && status.total_solve_moves > 0 && (
                             <span className="ml-2 text-xs font-normal text-gray-500">
                                  ({status.solve_move_index || 0} / {status.total_solve_moves})
@@ -439,7 +513,8 @@ export default function RubiksSolverPage() {
                         </p>
                     )}
                     {status.solution && (
-                        <div className="mt-2 text-sm text-blue-800 font-mono bg-blue-50 p-2 rounded border border-blue-200 max-h-24 overflow-y-auto">
+                        <div
+                            className="mt-2 text-sm text-blue-800 font-mono bg-blue-50 p-2 rounded border border-blue-200 max-h-24 overflow-y-auto">
                             <span className="font-semibold">Solution Found:</span>
                             <p className="whitespace-pre-wrap break-words text-xs leading-relaxed">{status.solution}</p>
                         </div>
@@ -451,7 +526,8 @@ export default function RubiksSolverPage() {
                     {/* Live Camera Feed */}
                     <div className="flex flex-col items-center">
                         <div className="mb-1 text-center text-sm font-medium text-gray-600">Live Camera Input</div>
-                        <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center shadow-inner">
+                        <div
+                            className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center shadow-inner">
                             {appliedCameraSettings.useIpCamera && (
                                 <img
                                     ref={ipCamImgRef}
@@ -462,7 +538,10 @@ export default function RubiksSolverPage() {
                                     height={240}
                                     className="object-contain"
                                     crossOrigin="anonymous"
-                                    onLoad={() => { console.log("IP Cam loaded"); setIsCameraLoading(false); }}
+                                    onLoad={() => {
+                                        console.log("IP Cam loaded");
+                                        setIsCameraLoading(false);
+                                    }}
                                     onError={(e) => {
                                         console.error("IP camera display error:", e);
                                         setIsCameraLoading(false);
@@ -482,8 +561,11 @@ export default function RubiksSolverPage() {
                                     autoPlay playsInline muted
                                     width={320} height={240}
                                     className="object-contain"
-                                    style={{ background: "#222" }}
-                                    onCanPlay={() => { console.log("Device Cam ready"); setIsCameraLoading(false); }}
+                                    style={{background: "#222"}}
+                                    onCanPlay={() => {
+                                        console.log("Device Cam ready");
+                                        setIsCameraLoading(false);
+                                    }}
                                     onError={(e) => {
                                         console.error("Video element display error:", e);
                                         setIsCameraLoading(false);
@@ -491,18 +573,23 @@ export default function RubiksSolverPage() {
                                 />
                             )}
                             {isCameraLoading && (
-                                <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-70 text-white text-lg">
+                                <div
+                                    className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-70 text-white text-lg">
                                     <div className="flex flex-col items-center">
-                                        <svg className="animate-spin h-8 w-8 text-white mb-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        <svg className="animate-spin h-8 w-8 text-white mb-2"
+                                             xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                                    strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor"
+                                                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                         </svg>
                                         <span>Loading Camera...</span>
                                     </div>
                                 </div>
                             )}
                             {!isCameraLoading && status.mode === "error" && status.error_message?.toLowerCase().includes("camera") && (
-                                <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75 text-white text-sm p-2">
+                                <div
+                                    className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-75 text-white text-sm p-2">
                                     <div className="p-3 text-center rounded bg-red-800 bg-opacity-90 shadow">
                                         <span className="font-bold block text-base">Camera Error</span>
                                         <span className="text-xs mt-1 block">{status.error_message}</span>
@@ -515,15 +602,20 @@ export default function RubiksSolverPage() {
 
                     {/* Processed Feed */}
                     <div className="flex flex-col items-center">
-                        <div className="mb-1 text-center text-sm font-medium text-gray-600">Processed View (from Backend)</div>
-                        <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center shadow-inner">
+                        <div className="mb-1 text-center text-sm font-medium text-gray-600">Processed View (from
+                                                                                            Backend)
+                        </div>
+                        <div
+                            className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center shadow-inner">
                             {processedFrame ? (
-                                <img src={processedFrame} width={320} height={240} alt="Processed Frame" className="object-contain" />
+                                <img src={processedFrame} width={320} height={240} alt="Processed Frame"
+                                     className="object-contain" />
                             ) : (
                                 <span className="text-gray-400 italic">Waiting for backend...</span>
                             )}
                             {isBackendProcessing && (
-                                <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-60 text-white text-xs p-1 animate-pulse">
+                                <div
+                                    className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-60 text-white text-xs p-1 animate-pulse">
                                     Backend Processing...
                                 </div>
                             )}
@@ -541,26 +633,30 @@ export default function RubiksSolverPage() {
                                 onClick={handleStartCalibration}
                                 disabled={actionDisabled}
                                 className="btn bg-indigo-500 hover:bg-indigo-600 disabled:bg-gray-400"
-                            > Start Calibration </button>
+                            > Start Calibration
+                            </button>
                             {status.mode === 'calibrating' && (
                                 <>
                                     <button
                                         onClick={handleCaptureColor}
                                         disabled={isActionLoading || (status.calibration_step == null || status.calibration_step >= COLOR_NAMES.length)}
                                         className="btn bg-teal-500 hover:bg-teal-600 disabled:bg-gray-400"
-                                    > Capture '{status.current_color || '?'}' </button>
+                                    > Capture '{status.current_color || '?'}'
+                                    </button>
                                     <button
                                         onClick={handleSaveCalibration}
                                         disabled={isActionLoading || (status.calibration_step == null || status.calibration_step < COLOR_NAMES.length)}
                                         className="btn bg-green-500 hover:bg-green-600 disabled:bg-gray-400"
-                                    > Save Calibration </button>
+                                    > Save Calibration
+                                    </button>
                                 </>
                             )}
                             <button
                                 onClick={handleResetCalibration}
                                 disabled={isActionLoading}
                                 className="btn bg-yellow-500 hover:bg-yellow-600 disabled:bg-gray-400 mt-2"
-                            > Reset Calibration </button>
+                            > Reset Calibration
+                            </button>
                         </div>
                     </div>
 
@@ -573,12 +669,14 @@ export default function RubiksSolverPage() {
                                 disabled={actionDisabled || !status.serial_connected}
                                 title={!status.serial_connected ? "Serial port disconnected" : ""}
                                 className={`btn bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 ${!status.serial_connected ? 'cursor-not-allowed' : ''}`}
-                            > Solve Cube </button>
+                            > Solve Cube
+                            </button>
                             <button
                                 onClick={handleStopAndReset}
                                 disabled={status.mode === 'idle' || status.mode === 'connecting' || isActionLoading}
                                 className="btn bg-orange-500 hover:bg-orange-600 disabled:bg-gray-400 mt-2"
-                            > Stop & Reset </button>
+                            > Stop & Reset
+                            </button>
                         </div>
                     </div>
 
@@ -591,7 +689,8 @@ export default function RubiksSolverPage() {
                                 disabled={actionDisabled || !status.serial_connected}
                                 title={!status.serial_connected ? "Serial port disconnected" : ""}
                                 className={`btn bg-red-500 hover:bg-red-600 disabled:bg-gray-400 ${!status.serial_connected ? 'cursor-not-allowed' : ''}`}
-                            > Scramble Cube </button>
+                            > Scramble Cube
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -614,16 +713,18 @@ export default function RubiksSolverPage() {
                     transition: background-color 0.2s;
                     text-align: center;
                 }
+
                 .btn:disabled {
                     cursor: not-allowed;
                     opacity: 0.7;
                 }
+
                 .btn:focus {
                     outline: none;
                     /* Add a subtle focus ring */
                     box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.5); /* Example focus ring (Tailwind blue-300 equivalent) */
-                 }
-             `}</style>
+                }
+            `}</style>
         </div>
     );
 }

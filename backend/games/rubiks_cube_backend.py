@@ -748,10 +748,11 @@ async def websocket_endpoint(websocket: WebSocket):
 # --- Helper functions for WebSocket frame processing ---
 async def send_status_update(websocket: WebSocket, frame_b64=None):
     """Sends the current state to the client via WebSocket."""
-    # (Keep function from previous version)
     global state
+    # --- THIS IS WHERE THE DATA IS CONSTRUCTED ---
     data_to_send = {
-        "mode": state.mode, "status_message": state.status_message,
+        "mode": state.mode,
+        "status_message": state.status_message,
         "calibration_step": state.calibration_step if state.mode == "calibrating" else None,
         "current_color": COLOR_NAMES[
             state.calibration_step] if state.mode == "calibrating" and state.calibration_step < len(
@@ -763,11 +764,25 @@ async def send_status_update(websocket: WebSocket, frame_b64=None):
         "error_message": state.error_message if state.mode == "error" else None,
         "serial_connected": state.serial_connection is not None and state.serial_connection.is_open
     }
-    if frame_b64: data_to_send["processed_frame"] = frame_b64
+    if frame_b64:
+        data_to_send["processed_frame"] = frame_b64
+
     try:
-        await websocket.send_json(data_to_send)
+        # *** The error occurs *before* or *during* this print/send ***
+        # The print statement uses .get() which might trigger it if data_to_send became a set somehow
+        print(
+            f"Attempting to send WS update: mode={data_to_send.get('mode')}, msg='{data_to_send.get('status_message')}'")  # <-- USING .get()
+        await websocket.send_json(data_to_send)  # <-- send_json expects a dict-like object
+
+    except WebSocketDisconnect:
+        print("WS Disconnected during send_status_update attempt.")
+    except AttributeError as e:  # Catch the specific error
+        print(f"!!! ATTRIBUTE ERROR during send_status_update: {e}")
+        # Optionally log the type and value of data_to_send
+        print(f"!!! Type of data_to_send: {type(data_to_send)}")
+        print(f"!!! Value of data_to_send: {data_to_send}")
     except Exception as e:
-        if not isinstance(e, WebSocketDisconnect): print(f"Failed to send status update: {e}")
+        print(f"!!! FAILED to send status update (Other Error): {type(e).__name__}: {e}")
 
 
 def draw_detection_overlay(frame, display_frame):
