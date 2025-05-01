@@ -28,8 +28,8 @@ class RubiksCubeGame:
         # Constants
         self.WINDOW_SIZE = (640, 480)
         self.SCAN_COOLDOWN = 0.5
-        self.MOTOR_STABILIZATION_TIME = 0.7
-        self.STABILITY_THRESHOLD = 5
+        self.MOTOR_STABILIZATION_TIME = 0.5
+        self.STABILITY_THRESHOLD = 1
         self.MIN_CONTOUR_AREA = 4000
         self.MAX_CONTOUR_AREA = 60000
         self.COLOR_NAMES = ["W", "R", "G", "Y", "O", "B"]
@@ -187,171 +187,219 @@ class RubiksCubeGame:
     
     def process_calibration_frame(self, frame, display_frame):
         """Process frame during calibration mode."""
-        # Detect cube and draw grid
-        cube_detected = self.detect_cube(frame)
+        # Draw calibration grid
+        grid_size = int(min(self.WINDOW_SIZE) * 0.4)
+        grid_cell_size = grid_size // 3
+        pad_x, pad_y = 20, 50
         
-        # Draw calibration target on top-left grid cell
-        if cube_detected and self.last_valid_grid:
-            pad_x, pad_y, grid_size = self.last_valid_grid
-            grid_cell_size = grid_size // 3
-            
-            # Draw full grid
-            cv2.rectangle(display_frame, 
-                         (pad_x, pad_y), 
-                         (pad_x + grid_size, pad_y + grid_size), 
-                         (0, 255, 0), 2)
-            
-            # Draw grid lines
-            for i in range(1, 3):
-                cv2.line(display_frame, 
-                        (pad_x + i * grid_cell_size, pad_y), 
-                        (pad_x + i * grid_cell_size, pad_y + grid_size), 
-                        (0, 255, 0), 2)
-                cv2.line(display_frame, 
-                        (pad_x, pad_y + i * grid_cell_size), 
-                        (pad_x + grid_size, pad_y + i * grid_cell_size), 
-                        (0, 255, 0), 2)
-            
-            # Highlight target cell (top-left)
-            cv2.rectangle(display_frame, 
-                         (pad_x, pad_y), 
-                         (pad_x + grid_cell_size, pad_y + grid_cell_size), 
-                         (0, 255, 255), 3)  # Yellow highlight
-            
-            # Add instruction text
-            current_color = self.COLOR_NAMES[self.calibration_step]
-            cv2.putText(display_frame, 
-                       f"Show {current_color} face, aim at highlighted cell", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            # Draw detected color if available
-            if self.last_processed_frame is not None:
-                roi = self.last_processed_frame[pad_y:pad_y + grid_cell_size, 
-                                             pad_x:pad_x + grid_cell_size]
-                color = self.detect_color(roi)
-                if color:
-                    cv2.putText(display_frame, color, 
-                              (pad_x + grid_cell_size//4, pad_y + grid_cell_size//2),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-        else:
-            cv2.putText(display_frame, 
-                       "Position cube in frame", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # Draw a small box around the center cell (1,1)
+        center_y_start = pad_y + grid_cell_size
+        center_y_end = pad_y + 2 * grid_cell_size
+        center_x_start = pad_x + grid_cell_size
+        center_x_end = pad_x + 2 * grid_cell_size
+        
+        # Draw the center cell box in green
+        cv2.rectangle(display_frame, 
+                     (center_x_start, center_y_start), 
+                     (center_x_end, center_y_end), 
+                     (0, 255, 0), 2)
+        
+        # Add instruction text
+        current_color = self.COLOR_NAMES[self.calibration_step]
+        instruction = f"Show {current_color} center, then click Capture"
+        cv2.putText(display_frame, instruction, 
+                   (pad_x, pad_y - 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Store grid position for calibration
+        self.last_valid_grid = (pad_x, pad_y, grid_size)
         
         return display_frame
     
     def process_scanning_frame(self, frame, display_frame):
         """Process frame during scanning mode."""
-        # Detect cube and draw grid
-        cube_detected = self.detect_cube(frame)
+        # Create a clean copy for display
+        display_frame = frame.copy()
         
-        if cube_detected and self.last_valid_grid:
-            pad_x, pad_y, grid_size = self.last_valid_grid
+        # Smooth the frame to reduce noise
+        frame = cv2.GaussianBlur(frame, (5, 5), 0)
+        
+        # Color detection and cube processing code
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        combined_mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
+        
+        # Create mask for all colors more efficiently
+        for color, (lower, upper) in self.color_ranges.items():
+            mask = cv2.inRange(hsv, lower, upper)
+            combined_mask = cv2.bitwise_or(combined_mask, mask)
+        
+        # Clean up mask more aggressively
+        kernel = np.ones((5,5), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        
+        # Find contours with less detail for better stability
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        cube_detected = False
+        best_contour = None
+        best_score = float('inf')
+        current_grid = self.last_valid_grid  # Keep previous grid if no new detection
+        
+        # Process only the largest contours
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:3]:
+            area = cv2.contourArea(contour)
+            if self.MIN_CONTOUR_AREA < area < self.MAX_CONTOUR_AREA:
+                peri = cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+                
+                if len(approx) >= 4:
+                    x, y, w, h = cv2.boundingRect(approx)
+                    aspect_ratio = float(w) / h
+                    squareness_score = abs(1 - aspect_ratio)
+                    
+                    if 0.7 < aspect_ratio < 1.3 and squareness_score < best_score:
+                        best_score = squareness_score
+                        best_contour = contour
+                        cube_detected = True
+                        
+                        # Smooth the grid position using previous position if available
+                        grid_size = min(w, h)
+                        center_x = x + w // 2
+                        center_y = y + h // 2
+                        pad_x = center_x - grid_size // 2
+                        pad_y = center_y - grid_size // 2
+                        
+                        if self.last_valid_grid:
+                            prev_x, prev_y, prev_size = self.last_valid_grid
+                            # Smooth the transition
+                            pad_x = int(0.7 * prev_x + 0.3 * pad_x)
+                            pad_y = int(0.7 * prev_y + 0.3 * pad_y)
+                            grid_size = int(0.7 * prev_size + 0.3 * grid_size)
+                        
+                        current_grid = (pad_x, pad_y, grid_size)
+                        break
+        
+        if cube_detected and best_contour is not None:
+            self.last_valid_grid = current_grid
+            pad_x, pad_y, grid_size = current_grid
+            
+            # Draw contour and grid with anti-aliasing for smoother appearance
+            cv2.drawContours(display_frame, [best_contour], -1, (0, 255, 0), 2, cv2.LINE_AA)
+            
             grid_cell_size = grid_size // 3
             
-            # Draw grid
-            cv2.rectangle(display_frame, 
-                         (pad_x, pad_y), 
-                         (pad_x + grid_size, pad_y + grid_size), 
-                         (0, 255, 0), 2)
-            
+            # Draw grid with anti-aliasing
             for i in range(1, 3):
                 cv2.line(display_frame, 
                         (pad_x + i * grid_cell_size, pad_y), 
                         (pad_x + i * grid_cell_size, pad_y + grid_size), 
-                        (0, 255, 0), 2)
+                        (0, 255, 0), 2, cv2.LINE_AA)
                 cv2.line(display_frame, 
                         (pad_x, pad_y + i * grid_cell_size), 
                         (pad_x + grid_size, pad_y + i * grid_cell_size), 
-                        (0, 255, 0), 2)
+                        (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.rectangle(display_frame, 
+                        (pad_x, pad_y), 
+                        (pad_x + grid_size, pad_y + grid_size), 
+                        (0, 255, 0), 2, cv2.LINE_AA)
             
-            # Get face colors and draw them
-            face_colors = []
-            for i in range(3):
-                for j in range(3):
-                    y_start = pad_y + i * grid_cell_size
-                    y_end = pad_y + (i + 1) * grid_cell_size
-                    x_start = pad_x + j * grid_cell_size
-                    x_end = pad_x + (j + 1) * grid_cell_size
-                    
-                    padding = grid_cell_size // 8
-                    y_start += padding
-                    y_end -= padding
-                    x_start += padding
-                    x_end -= padding
-                    
-                    roi = frame[y_start:y_end, x_start:x_end]
-                    color = self.detect_color(roi)
-                    if color:
-                        face_colors.append(color)
-                        # Draw detected color
-                        cv2.putText(display_frame, 
-                                  color, 
-                                  (x_start + grid_cell_size//4, y_start + grid_cell_size//2),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-            
-            # Check stability
-            current_time = time.time()
-            time_since_last_scan = current_time - self.last_scan_time if hasattr(self, 'last_scan_time') else float('inf')
-            
-            if len(face_colors) == 9:
-                if not hasattr(self, 'prev_face_colors'):
-                    self.prev_face_colors = face_colors
-                    self.stability_counter = 1
-                elif face_colors == self.prev_face_colors:
-                    self.stability_counter += 1
+            # Check stability based on contour shape and position
+            if hasattr(self, 'prev_contour') and self.prev_contour is not None:
+                shape_diff = cv2.matchShapes(best_contour, self.prev_contour, 1, 0.0)
+                position_diff = abs(pad_x - self.prev_x) + abs(pad_y - self.prev_y)
+                
+                if shape_diff < 0.3 and position_diff < 20:
+                    # Only increment if below threshold
+                    if self.stability_counter < self.STABILITY_THRESHOLD:
+                        self.stability_counter += 1
                 else:
-                    self.prev_face_colors = face_colors
-                    self.stability_counter = 1
+                    self.stability_counter = max(0, self.stability_counter - 1)  # Gradual decrease
+            
+            self.prev_contour = best_contour
+            self.prev_x, self.prev_y = pad_x, pad_y
+            
+            # Get face colors and check for auto-scanning
+            current_time = time.time()
+            time_since_last_scan = current_time - self.last_scan_time
+            
+            if (self.stability_counter >= self.STABILITY_THRESHOLD and 
+                time_since_last_scan >= self.SCAN_COOLDOWN):
                 
-                # Show stability progress
-                cv2.putText(display_frame,
-                          f"Stability: {self.stability_counter}/{self.STABILITY_THRESHOLD}",
-                          (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                face_colors = []
+                for i in range(3):
+                    for j in range(3):
+                        y_start = pad_y + i * grid_cell_size
+                        y_end = pad_y + (i + 1) * grid_cell_size
+                        x_start = pad_x + j * grid_cell_size
+                        x_end = pad_x + (j + 1) * grid_cell_size
+                        
+                        padding = grid_cell_size // 8
+                        y_start += padding
+                        y_end -= padding
+                        x_start += padding
+                        x_end -= padding
+                        
+                        roi = frame[y_start:y_end, x_start:x_end]
+                        color = self.detect_color(roi)
+                        if color:
+                            face_colors.append(color)
+                            # Draw detected color with anti-aliasing
+                            cv2.putText(display_frame, 
+                                      color, 
+                                      (x_start + grid_cell_size//4, y_start + grid_cell_size//2),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2, cv2.LINE_AA)
                 
-                # Auto-capture if stable enough
-                if (self.stability_counter >= self.STABILITY_THRESHOLD and 
-                    time_since_last_scan >= self.SCAN_COOLDOWN):
-                    self.u_scans[self.current_scan_idx] = face_colors
-                    self.current_scan_idx += 1
-                    self.last_scan_time = current_time
-                    self.stability_counter = 0
-                    self.prev_face_colors = None
-                    
-                    # Send rotation command if not last scan
-                    if self.current_scan_idx < len(self.rotation_sequence):
-                        move = self.rotation_sequence[self.current_scan_idx]
-                        if move:
-                            self.send_arduino_command(move)
-                    
-                    # Check if all scans complete
-                    if self.current_scan_idx >= 12:
-                        # Process solution
-                        cube_state = self.construct_cube_state()
-                        if cube_state:
-                            solution = self.solve_cube(cube_state)
-                            if solution:
-                                self.solution = solution
-                                self.mode = "solving"
-                                self.current_solve_move_index = 0
-                                self.total_solve_moves = len(solution.split())
-                                self.status_message = "Solution found, executing moves"
-                                self.send_arduino_command(solution)
+                if len(face_colors) == 9:
+                    if not hasattr(self, 'prev_face_colors'):
+                        self.prev_face_colors = face_colors
+                        self.stability_counter = 1
+                    elif face_colors == self.prev_face_colors:
+                        self.u_scans[self.current_scan_idx] = face_colors
+                        self.current_scan_idx += 1
+                        self.last_scan_time = current_time
+                        self.stability_counter = 0
+                        self.prev_face_colors = None
+                        
+                        # Send rotation command if not last scan
+                        if self.current_scan_idx < len(self.rotation_sequence):
+                            move = self.rotation_sequence[self.current_scan_idx]
+                            if move:
+                                self.send_arduino_command(move)
+                        
+                        # Check if all scans complete
+                        if self.current_scan_idx >= 12:
+                            # Process solution
+                            cube_state = self.construct_cube_state()
+                            if cube_state:
+                                solution = self.solve_cube(cube_state)
+                                if solution:
+                                    self.solution = solution
+                                    self.mode = "solving"
+                                    self.current_solve_move_index = 0
+                                    self.total_solve_moves = len(solution.split())
+                                    self.status_message = "Solution found, executing moves"
+                                    self.send_arduino_command(solution)
+                                else:
+                                    self.mode = "error"
+                                    self.error_message = "Could not find solution"
                             else:
                                 self.mode = "error"
-                                self.error_message = "Could not find solution"
-                        else:
-                            self.mode = "error"
-                            self.error_message = "Invalid cube state"
-            
-            # Add scan progress text
-            cv2.putText(display_frame, 
-                       f"Scan {self.current_scan_idx + 1}/12", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                                self.error_message = "Invalid cube state"
+                    else:
+                        self.prev_face_colors = face_colors
+                        self.stability_counter = 1
         else:
-            cv2.putText(display_frame, 
-                       "Position cube for scanning", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            self.stability_counter = max(0, self.stability_counter - 1)  # Gradual decrease
+            self.prev_contour = None
+        
+        # Add scan progress and stability text with anti-aliasing
+        if self.current_scan_idx < 12:
+            if cube_detected:
+                status = f"Scan {self.current_scan_idx + 1}/12 - Stability: {min(self.stability_counter, self.STABILITY_THRESHOLD)}/{self.STABILITY_THRESHOLD}"
+            else:
+                status = f"Position cube for scan {self.current_scan_idx + 1}/12"
+            cv2.putText(display_frame, status, (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
         
         return display_frame
     
@@ -484,14 +532,15 @@ class RubiksCubeGame:
             pad_x, pad_y, grid_size = self.last_valid_grid
             grid_cell_size = grid_size // 3
             
-            # Get ROI from top-left cell
-            padding = grid_cell_size // 8
-            roi_y_start = max(0, pad_y + padding)
-            roi_y_end = min(self.last_processed_frame.shape[0], pad_y + grid_cell_size - padding)
-            roi_x_start = max(0, pad_x + padding)
-            roi_x_end = min(self.last_processed_frame.shape[1], pad_x + grid_cell_size - padding)
+            # Get ROI from center cell (1,1)
+            center_y_start = pad_y + grid_cell_size
+            center_y_end = pad_y + 2 * grid_cell_size
+            center_x_start = pad_x + grid_cell_size
+            center_x_end = pad_x + 2 * grid_cell_size
             
-            roi = self.last_processed_frame[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+            roi = self.last_processed_frame[center_y_start:center_y_end, 
+                                         center_x_start:center_x_end]
+            
             if roi.size == 0:
                 return False
             
@@ -500,29 +549,18 @@ class RubiksCubeGame:
             avg_hsv = np.mean(hsv_roi, axis=(0, 1))
             
             current_color = self.COLOR_NAMES[self.calibration_step]
-            h_range = 10 if current_color != "W" else 30  # Wider range for white
-            s_range = 70
-            v_range = 70
+            h_range = 10 if current_color != "W" else 90  # Wider hue range for white
+            s_range = 50
+            v_range = 50
             
             # Calculate lower and upper bounds
-            h_mean = avg_hsv[0]
-            if h_mean < h_range:
-                h_lower = 0
-                h_upper = min(180, h_mean + h_range)
-            elif h_mean > (180 - h_range):
-                h_lower = max(0, h_mean - h_range)
-                h_upper = 180
-            else:
-                h_lower = max(0, h_mean - h_range)
-                h_upper = min(180, h_mean + h_range)
-            
             lower = np.array([
-                h_lower,
+                max(0, avg_hsv[0] - h_range),
                 max(0, avg_hsv[1] - s_range),
                 max(0, avg_hsv[2] - v_range)
             ])
             upper = np.array([
-                h_upper,
+                min(180, avg_hsv[0] + h_range),
                 min(255, avg_hsv[1] + s_range),
                 min(255, avg_hsv[2] + v_range)
             ])

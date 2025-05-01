@@ -5,7 +5,8 @@ import { initializeVideoSource } from "@/utils/cameraUtils";
 
 // Helper constant
 const COLOR_NAMES = ["W", "R", "G", "Y", "O", "B"];
-const MIN_FRAME_INTERVAL = 100; // Match other games' frame rate control
+const MIN_FRAME_INTERVAL = 30; // Increase interval between frames to 100ms (10 FPS)
+const JPEG_QUALITY = 1; // Increase JPEG quality for better image
 
 export default function RubiksSolverPage() {
     const gameId = "rubiks";
@@ -133,9 +134,13 @@ export default function RubiksSolverPage() {
                 ? ipCamImgRef.current
                 : videoRef.current;
             if (sourceEl && canvas && ws && ws.readyState === 1) {
-                const ctx = canvas.getContext("2d");
+                const ctx = canvas.getContext("2d", { alpha: false });
                 try {
+                    // Clear canvas and draw new frame
+                    ctx.fillStyle = 'black';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
                     ctx.drawImage(sourceEl, 0, 0, canvas.width, canvas.height);
+                    
                     canvas.toBlob(
                         (blob) => {
                             if (blob) {
@@ -147,7 +152,7 @@ export default function RubiksSolverPage() {
                             }
                         },
                         "image/jpeg",
-                        0.7
+                        JPEG_QUALITY
                     );
                 } catch (e) {}
             }
