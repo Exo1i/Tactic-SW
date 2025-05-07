@@ -1,17 +1,16 @@
 """Train model to detect X's, O's or None"""
 
-
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import cv2
 import numpy as np
 
-from keras.utils import to_categorical
-from keras.models import Sequential
-from keras.layers import Conv2D, MaxPooling2D
-from keras.layers import Activation, Flatten, Dense, Dropout
-from keras.callbacks import EarlyStopping
-from keras.preprocessing.image import ImageDataGenerator
-
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D
+from tensorflow.keras.layers import Activation, Flatten, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 # Replicate results
 np.random.seed(42)
@@ -84,52 +83,52 @@ def load_data(root_dir, shuffle=True):
     return np.asarray(X), np.asarray(y)
 
 
-print('Loading data...')
-X_train, y_train = load_data(TRAIN_DIR)
-X_test, y_test = load_data(TEST_DIR)
-print('{} instances for training'.format(len(X_train)))
-print('{} instances for evaluation'.format(len(X_test)))
+if __name__ == "__main__":
+    print('Loading data...')
+    X_train, y_train = load_data(TRAIN_DIR)
+    X_test, y_test = load_data(TEST_DIR)
+    print('{} instances for training'.format(len(X_train)))
+    print('{} instances for evaluation'.format(len(X_test)))
 
+    # Create more instances since our dataset is VERY limited
+    train_val_datagen = ImageDataGenerator(
+        featurewise_center=True,
+        featurewise_std_normalization=True,
+        rotation_range=90,
+        shear_range=0.2,
+        horizontal_flip=True,
+        vertical_flip=True,
+        rescale=1 / 255,
+        validation_split=0.2)
 
-# Create more instances since our dataset is VERY limited
-train_val_datagen = ImageDataGenerator(
-    featurewise_center=True,
-    featurewise_std_normalization=True,
-    rotation_range=90,
-    shear_range=0.2,
-    horizontal_flip=True,
-    vertical_flip=True,
-    rescale=1 / 255,
-    validation_split=0.2)
+    train_generator = train_val_datagen.flow(
+        X_train, y_train, batch_size=batch_size, subset='training')
 
-train_generator = train_val_datagen.flow(
-    X_train, y_train, batch_size=batch_size, subset='training')
+    val_generator = train_val_datagen.flow(
+        X_train, y_train, batch_size=batch_size, subset='validation')
 
-val_generator = train_val_datagen.flow(
-    X_train, y_train, batch_size=batch_size, subset='validation')
+    # Train and evaluate
+    callbacks = [
+        EarlyStopping(patience=5, verbose=1, restore_best_weights=True)]
 
-# Train and evaluate
-callbacks = [
-    EarlyStopping(patience=5, verbose=1, restore_best_weights=True)]
+    print('Training model...')
+    history = model.fit(
+        train_generator,
+        steps_per_epoch=128,
+        epochs=epochs,
+        validation_data=val_generator,
+        validation_steps=32,
+        callbacks=callbacks)
 
-print('Training model...')
-history = model.fit_generator(
-    train_generator,
-    steps_per_epoch=128,
-    epochs=epochs,
-    validation_data=val_generator,
-    validation_steps=32,
-    callbacks=callbacks)
+    print('Evaluating model...')
+    # Load data
+    test_datagen = ImageDataGenerator(rescale=1 / 255)
+    X_test, y_test = next(test_datagen.flow(X_test, y_test, batch_size=len(X_test)))
 
-print('Evaluating model...')
-# Load data
-test_datagen = ImageDataGenerator(rescale=1 / 255)
-X_test, y_test = next(test_datagen.flow(X_test, y_test, batch_size=len(X_test)))
+    loss, acc = model.evaluate(X_test, y_test, batch_size=batch_size)
+    print('Crossentropy loss: {:0.3f}'.format(loss))
+    print('Accuracy: {:0.3f}'.format(acc))
 
-loss, acc = model.evaluate(X_test, y_test, batch_size=batch_size)
-print('Crossentropy loss: {:0.3f}'.format(loss))
-print('Accuracy: {:0.3f}'.format(acc))
-
-# Save model
-# model.save('../data/model.h5')
-# print('Saved model to disk')
+    # Save model
+    model.save('../data/model.h5')
+    print('Saved model to disk')

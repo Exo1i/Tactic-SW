@@ -1,15 +1,16 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 import cv2
 import numpy as np
 import base64
 import time
-from keras.models import load_model
-from utils import detections, imutils
+from tensorflow.keras.models import load_model
+from .utils import detections, imutils
 from alphabeta import Tic, get_enemy, determine
 
 class GameSession:
     def __init__(self, config):
         try:
-            import os
             model_path = config.get("model", "data/model.h5")
             if not os.path.exists(model_path):
                 print(f"Model not found at {model_path}, searching in backend directory...")
@@ -21,12 +22,12 @@ class GameSession:
         except Exception as e:
             print(f"Error loading model: {e}")
             self.model = None
-            
+
         # Game state
         self.zoom = float(config.get("zoom", 1.0))
         self.check_interval = float(config.get("check_interval", 3.0))
         self.board = Tic()
-        self.history = {}  # Stores confirmed moves
+        self.history = {}
         self.previous_state = [None] * 9
         self.last_check_time = time.time()
         self.move_detected_in_last_cycle = False
@@ -124,15 +125,13 @@ class GameSession:
 
         mapper = {0: None, 1: 'X', 2: 'O'}
         try:
-            processed_cell = detections.preprocess_input(gray_cell)
+            processed_cell = detections.preprocess_input(gray_cell)  # returns (1, 32, 32, 1)
             prediction = self.model.predict(processed_cell, verbose=0)
             idx = np.argmax(prediction)
             confidence = prediction[0][idx]
-
             confidence_threshold = 0.80
             if confidence < confidence_threshold:
                 return None
-
             return mapper[idx]
         except Exception as e:
             print(f"Error in shape detection: {e}")
