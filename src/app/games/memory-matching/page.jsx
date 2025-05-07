@@ -72,7 +72,7 @@ export default function MemoryGame() {
 
         // Adjust protocol and hostname/port as needed
         const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-        const wsUrl = `${wsProtocol}${window.location.hostname}:8000/ws/${version}`;
+        const wsUrl = `${wsProtocol}${window.location.hostname}:8000/ws/memory-matching`; // Use centralized endpoint
         console.log(`Attempting to connect to: ${wsUrl}`);
         websocket.current = new WebSocket(wsUrl);
 
@@ -80,6 +80,8 @@ export default function MemoryGame() {
             console.log('WebSocket Connected');
             setIsConnected(true);
             setMessage(`${version.charAt(0).toUpperCase() + version.slice(1)} game connected. Waiting for start...`);
+            // Send config message to select mode
+            websocket.current.send(JSON.stringify({mode: version}));
         };
 
         websocket.current.onclose = (event) => {
