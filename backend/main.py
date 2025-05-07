@@ -9,6 +9,7 @@ import inspect
 
 # Import memory matching backend for color/yolo WebSocket endpoints
 from games import memory_matching_backend
+from games.rubiks_cube_game import RubiksCubeGame
 
 app = FastAPI()
 
@@ -30,11 +31,12 @@ if TICTACTOE_DIR not in sys.path:
 GAME_MODULES = {
     "shell-game": "games.shellGame",
     "tic-tac-toe": "games.tic-tac-toe.tictactoe",
+    "rubiks": "games.rubiks_cube_game",
     "game-2": "games.game2",   # Placeholder, implement games/game2.py
     "game-3": "games.game3",   # Placeholder, implement games/game3.py
     "game-4": "games.game4",   # Placeholder, implement games/game4.py
     "game-5": "games.game5",   # Placeholder, implement games/game5.py
-    "memory-matching": "games.memory_matching_backend",  # <-- Add this line
+    "memory-matching": "games.memory_matching_backend",
 }
 
 @app.websocket("/ws/{game_id}")
@@ -49,11 +51,12 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
 
     try:
         game_module = importlib.import_module(module_path)
-        # Try to receive a config message (JSON) as first message, else treat as frame
-        first_message = await websocket.receive()
-        config = None
-        first_frame_bytes = None
-        if first_message["type"] == "websocket.receive":
+        # Special handling for Rubik's Cube
+        if game_id == "rubiks":
+            # Wait for initial config message (optional)
+            first_message = await websocket.receive()
+            config = None
+            first_frame_bytes = None
             if "text" in first_message:
                 try:
                     config = json.loads(first_message["text"])
@@ -61,11 +64,26 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     config = None
             elif "bytes" in first_message:
                 first_frame_bytes = first_message["bytes"]
-        # Pass config to GameSession if present
-        if config is not None:
-            game_session = game_module.GameSession(config)
+            if config is not None:
+                game_session = RubiksCubeGame(config)
+            else:
+                game_session = RubiksCubeGame()
         else:
-            game_session = game_module.GameSession()
+            # Default: try to receive config as first message, else treat as frame
+            first_message = await websocket.receive()
+            config = None
+            first_frame_bytes = None
+            if "text" in first_message:
+                try:
+                    config = json.loads(first_message["text"])
+                except Exception:
+                    config = None
+            elif "bytes" in first_message:
+                first_frame_bytes = first_message["bytes"]
+            if config is not None:
+                game_session = game_module.GameSession(config)
+            else:
+                game_session = game_module.GameSession()
     except Exception as e:
         await websocket.send_json({"status": "error", "message": f"Failed to load game: {e}"})
         await websocket.close()
@@ -78,15 +96,58 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
 
     try:
         # If first message was a frame, process it before entering loop
-        if first_frame_bytes is not None:
+        if game_id == "rubiks" and 'first_frame_bytes' in locals() and first_frame_bytes is not None:
+            result = game_session.process_frame(first_frame_bytes)
+            await websocket.send_json(result)
+        elif 'first_frame_bytes' in locals() and first_frame_bytes is not None:
             result = await maybe_await(game_session.process_frame, first_frame_bytes)
             await websocket.send_json(result)
         while True:
-            data = await websocket.receive_bytes()
-            result = await maybe_await(game_session.process_frame, data)
-            await websocket.send_json(result)
+            data = await websocket.receive()
+            try:
+                if "bytes" in data:
+                    # For games that process video frames (like Rubik's cube)
+                    if game_id == "rubiks":
+                        result = game_session.process_frame(data["bytes"])
+                    else:
+                        result = await maybe_await(game_session.process_frame, data["bytes"])
+                elif "text" in data:
+                    config = {}
+                    try:
+                        config = json.loads(data["text"])
+                    except:
+                        pass
+                    if game_id == "rubiks":
+                        # Handle Rubik's cube specific commands
+                        if "mode" in config:
+                            if config["mode"] == "calibrating":
+                                game_session.mode = "calibrating"
+                                game_session.calibration_step = 0
+                            elif config["mode"] == "scanning":
+                                game_session.start_scanning()
+                            elif config["mode"] == "scrambling":
+                                game_session.scramble_cube()
+                            elif config["mode"] == "idle":
+                                game_session.stop()
+                        elif "action" in config:
+                            if config["action"] == "calibrate":
+                                game_session.calibrate_color()
+                            elif config["action"] == "scan":
+                                game_session.capture_scan()
+                            elif config["action"] == "stop":
+                                game_session.stop()
+                        result = game_session.get_state()
+                    else:
+                        result = await maybe_await(game_session.process_command, config)
+                else:
+                    result = {"status": "error", "message": "Invalid message format"}
+                await websocket.send_json(result)
+            except Exception as e:
+                result = {"status": "error", "message": str(e)}
+                await websocket.send_json(result)
     except WebSocketDisconnect:
-        pass
+        if game_session and hasattr(game_session, 'cleanup'):
+            game_session.cleanup()
 
 # Helper to support both sync and async process_frame
 async def maybe_await(func, *args, **kwargs):
