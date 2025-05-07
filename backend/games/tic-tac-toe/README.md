@@ -1,8 +1,10 @@
 # Play tic-tac-toe with OpenCV and Keras
-This project is about the traditional game of tic-tac-toe. Using OpenCV and Keras we are now able to play it
+This project is about the traditional game of tic-tac-toe. Using OpenCV and Keras (via TensorFlow 2.x+) we are now able to play it
 against the computer using a real board and a marker.
 
 ## Requirements
+- Python 3.11
+- TensorFlow 2.12+ (includes Keras)
 - Sheet of paper
 - Black marker
 - USB camera to stream video feed directly to the computer
