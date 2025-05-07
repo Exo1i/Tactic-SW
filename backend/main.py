@@ -4,6 +4,8 @@ import uvicorn
 import importlib
 import sys
 import os
+import json
+import inspect
 
 # Import memory matching backend for color/yolo WebSocket endpoints
 from games import memory_matching_backend
@@ -32,44 +34,66 @@ GAME_MODULES = {
     "game-3": "games.game3",   # Placeholder, implement games/game3.py
     "game-4": "games.game4",   # Placeholder, implement games/game4.py
     "game-5": "games.game5",   # Placeholder, implement games/game5.py
+    "memory-matching": "games.memory_matching_backend",  # <-- Add this line
 }
 
 @app.websocket("/ws/{game_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str):
     await websocket.accept()
     game_session = None
-    # Dynamically import the game module and create a session
     module_path = GAME_MODULES.get(game_id)
-    if module_path:
-        try:
-            game_module = importlib.import_module(module_path)
-            # For tic-tac-toe, allow passing arguments via query params or initial message
-            if game_id == "tic-tac-toe":
-                # Wait for initial config message
-                config = await websocket.receive_json()
-                # Example: {"model": "...", "zoom": 2.0, "check_interval": 5.0}
-                game_session = game_module.GameSession(config)
-            else:
-                game_session = game_module.GameSession()
-        except Exception as e:
-            await websocket.send_json({"status": "error", "message": f"Failed to load game: {e}"})
-            await websocket.close()
-            return
-    else:
+    if not module_path:
         await websocket.send_json({"status": "error", "message": "Unknown game"})
         await websocket.close()
         return
 
     try:
+        game_module = importlib.import_module(module_path)
+        # Try to receive a config message (JSON) as first message, else treat as frame
+        first_message = await websocket.receive()
+        config = None
+        first_frame_bytes = None
+        if first_message["type"] == "websocket.receive":
+            if "text" in first_message:
+                try:
+                    config = json.loads(first_message["text"])
+                except Exception:
+                    config = None
+            elif "bytes" in first_message:
+                first_frame_bytes = first_message["bytes"]
+        # Pass config to GameSession if present
+        if config is not None:
+            game_session = game_module.GameSession(config)
+        else:
+            game_session = game_module.GameSession()
+    except Exception as e:
+        await websocket.send_json({"status": "error", "message": f"Failed to load game: {e}"})
+        await websocket.close()
+        return
+
+    # Special handling for memory-matching: run full game logic
+    if game_id == "memory-matching":
+        await game_session.run_game(websocket)
+        return
+
+    try:
+        # If first message was a frame, process it before entering loop
+        if first_frame_bytes is not None:
+            result = await maybe_await(game_session.process_frame, first_frame_bytes)
+            await websocket.send_json(result)
         while True:
             data = await websocket.receive_bytes()
-            try:
-                result = game_session.process_frame(data)
-            except Exception as e:
-                result = {"status": "error", "message": str(e)}
+            result = await maybe_await(game_session.process_frame, data)
             await websocket.send_json(result)
     except WebSocketDisconnect:
         pass
+
+# Helper to support both sync and async process_frame
+async def maybe_await(func, *args, **kwargs):
+    res = func(*args, **kwargs)
+    if inspect.isawaitable(res):
+        return await res
+    return res
 
 # Add endpoints for memory matching game (color and yolo)
 @app.websocket("/ws/memory-matching/color")

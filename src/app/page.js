@@ -5,7 +5,7 @@ const games = [
   { name: "Shell Game", id: "shell-game" },
   { name: "Tic Tac Toe", id: "tic-tac-toe" },
   { name: "Rubik's Game", id: "rubiks-game" },
-  { name: "Game 3", id: "game-3" },
+  { name: "Memory Matching", id: "memory-matching" },
   { name: "Game 4", id: "game-4" },
   { name: "Game 5", id: "game-5" },
 ];

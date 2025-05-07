@@ -21,7 +21,7 @@ from starlette.exceptions import HTTPException # Added for catch_all
 # --- Configuration ---
 SERIAL_PORT = '/dev/ttyUSB0'  # Adjust as needed (e.g., 'COM3' on Windows)
 BAUD_RATE = 9600
-CAMERA_URL = 'http://192.168.2.19:4747/mjpegfeed?640x480' # Primary Camera URL
+CAMERA_URL = 'http://192.168.137.76:4747/video' # Primary Camera URL
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -313,7 +313,7 @@ def from_to_sync(src: str, dest: str, card_id: int) -> bool:
         return True
 
     except Exception as e: # Catch unexpected errors during sequence logic
-        logging.error(f"Unexpected error during SYNC sequence ({src} -> {dest}, card {card_id}): {e}", exc_info=True)
+        logging.error(f"Unexpected error during SYNC sequence ({src} -> {dest}, card {id}): {e}", exc_info=True)
         logging.warning("Attempting to return arm home after unexpected sequence error.")
         send_arm_command_sync(arm_home[0], arm_home[1], arm_home[2], 0, 1) # Try recovery
         return False
@@ -1022,7 +1022,7 @@ async def run_yolo_game(websocket: WebSocket):
                                 await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
                         else: # Should not happen
                             logging.error(f"Detect returned unexpected None for {card_to_flip}. Returning first.")
-                            await update_frontend_state(f"Internal error detect {card_to_flip}. Returning first card.")
+                            await update_frontend_state(f"Internal error during detection for {card_to_flip}. Returning first card.")
                             await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
                             game_state["last_detect_fail_id"] = card_to_flip
                         await update_frontend_state()
@@ -1051,9 +1051,9 @@ async def run_yolo_game(websocket: WebSocket):
                     success1 = await from_to(websocket, "temp1", "trash", card1_id)
                     if not success1:
                         logging.error(f"Arm fail temp1->trash {card1_id}. Returning both cards.")
-                        await update_frontend_state(f"Arm fail temp1->trash {card1_id}. Return both.")
-                        await from_to(websocket, "temp1", "card", card1_id) # Attempt return
-                        await from_to(websocket, "temp2", "card", card2_id) # Attempt return
+                        await update_frontend_state(f"Arm fail temp1->trash {card1_id}. Returning both cards.")
+                        await from_to(websocket, "temp1", "card", card1_id) # Attempt to return
+                        await from_to(websocket, "temp2", "card", card2_id) # Attempt to return
                         current_flipped.clear(); await update_frontend_state(); continue
                     # Move second from Temp2 to trash
                     success2 = await from_to(websocket, "temp2", "trash", card2_id)
@@ -1620,3 +1620,131 @@ if __name__ == "__main__":
     )
 
 # --- END OF FILE memory_matching_backend.py ---
+
+class GameSession:
+    """
+    Adapter class to allow memory_matching_backend to be used as a dynamic game module.
+    Usage: session = GameSession({"mode": "color"|"yolo"})
+           result = await session.process_frame(frame_bytes)
+    """
+    def __init__(self, config=None):
+        # config: {"mode": "color"} or {"mode": "yolo"}
+        self.mode = "color"
+        if config and isinstance(config, dict) and "mode" in config:
+            if config["mode"] in ("color", "yolo"):
+                self.mode = config["mode"]
+        self._initialized = False
+
+    async def _ensure_init(self):
+        # Lazy init for YOLO model, etc.
+        global yolo_model_global
+        if self.mode == "yolo" and yolo_model_global is None:
+            # Try to load YOLO model if not already loaded
+            await load_yolo_model_on_startup()
+        self._initialized = True
+
+    async def process_frame(self, frame_bytes):
+        # Accepts a frame (bytes), returns a dict result
+        if not self._initialized:
+            await self._ensure_init()
+        # Simulate a minimal game loop: just detect color/object at all cards and return the board state
+        # This is a stateless "demo" for compatibility with main.py's interface
+        results = {}
+        try:
+            np_arr = np.frombuffer(frame_bytes, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            # Find board and warp
+            corners = find_board_corners(frame)
+            warped = transform_board(frame, corners) if corners is not None else None
+            if warped is None:
+                return {"status": "error", "message": "Board not detected"}
+            board_state = []
+            for card_id in range(GRID_ROWS * GRID_COLS):
+                if self.mode == "color":
+                    # Use color detection
+                    row, col = card_id // GRID_COLS, card_id % GRID_COLS
+                    cell_width = COLOR_BOARD_DETECT_WIDTH // GRID_COLS
+                    cell_height = COLOR_BOARD_DETECT_HEIGHT // GRID_ROWS
+                    x1, y1 = col * cell_width, row * cell_height
+                    x2, y2 = x1 + cell_width, y1 + cell_height
+                    padding = 5
+                    roi_x1 = max(0, x1 + padding)
+                    roi_y1 = max(0, y1 + padding)
+                    roi_x2 = min(COLOR_BOARD_DETECT_WIDTH - 1, x2 - padding)
+                    roi_y2 = min(COLOR_BOARD_DETECT_HEIGHT - 1, y2 - padding)
+                    cell_roi = warped[roi_y1:roi_y2, roi_x1:roi_x2]
+                    color = None
+                    if cell_roi.size > 0:
+                        hsv_roi = cv2.cvtColor(cell_roi, cv2.COLOR_BGR2HSV)
+                        detected_colors_count = {}
+                        for color_def in COLOR_RANGES:
+                            color_name = color_def['name']
+                            total_mask = np.zeros(hsv_roi.shape[:2], dtype=np.uint8)
+                            for l_bound, u_bound in zip(color_def['lower'], color_def['upper']):
+                                lower = np.array(l_bound)
+                                upper = np.array(u_bound)
+                                mask_part = cv2.inRange(hsv_roi, lower, upper)
+                                total_mask = cv2.bitwise_or(total_mask, mask_part)
+                            pixel_count = cv2.countNonZero(total_mask)
+                            if pixel_count > 0:
+                                detected_colors_count[color_name] = pixel_count
+                        # Find dominant color
+                        dominant_color = None
+                        max_pixels = 0
+                        for color_name, pixel_count in detected_colors_count.items():
+                            if color_name != "black" and pixel_count > max_pixels:
+                                max_pixels = pixel_count
+                                dominant_color = color_name
+                        color = dominant_color or "unknown"
+                    board_state.append(color)
+                else:
+                    # Use YOLO detection
+                    if yolo_model_global is None:
+                        board_state.append("no_model")
+                        continue
+                    row, col = card_id // GRID_COLS, card_id % GRID_COLS
+                    cell_width = COLOR_BOARD_DETECT_WIDTH // GRID_COLS
+                    cell_height = COLOR_BOARD_DETECT_HEIGHT // GRID_ROWS
+                    x1, y1 = col * cell_width, row * cell_height
+                    x2, y2 = x1 + cell_width, y1 + cell_height
+                    padding = 5
+                    roi_x1 = max(0, x1 + padding)
+                    roi_y1 = max(0, y1 + padding)
+                    roi_x2 = min(COLOR_BOARD_DETECT_WIDTH - 1, x2 - padding)
+                    roi_y2 = min(COLOR_BOARD_DETECT_HEIGHT - 1, y2 - padding)
+                    card_roi = warped[roi_y1:roi_y2, roi_x1:roi_x2]
+                    label = None
+                    if card_roi.size > 0:
+                        try:
+                            target_indices = [i for i, lbl in enumerate(yolo_model_global.names.values()) if lbl.lower() in YOLO_TARGET_LABELS]
+                            results_yolo = yolo_model_global.predict(card_roi, conf=0.45, verbose=False, device='cpu', classes=target_indices if target_indices else None)
+                            detected_object_label = None
+                            highest_conf = 0.0
+                            for result in results_yolo:
+                                boxes = getattr(result, 'boxes', None)
+                                names = getattr(result, 'names', {})
+                                if boxes:
+                                    for box in boxes:
+                                        cls_tensor = getattr(box, 'cls', None)
+                                        conf_tensor = getattr(box, 'conf', None)
+                                        if cls_tensor is not None and conf_tensor is not None and cls_tensor.numel() > 0 and conf_tensor.numel() > 0:
+                                            label_index = int(cls_tensor[0].item())
+                                            score = conf_tensor[0].item()
+                                            label_name = names.get(label_index, f"unknown_idx_{label_index}").lower()
+                                            if label_name in YOLO_TARGET_LABELS and score > highest_conf:
+                                                highest_conf = score
+                                                detected_object_label = label_name
+                            label = detected_object_label or "unknown"
+                        except Exception:
+                            label = "error"
+                    board_state.append(label)
+            return {"status": "ok", "mode": self.mode, "board": board_state}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    async def run_game(self, websocket):
+        # Start the actual game logic (stateful, with camera, arm, etc.)
+        if self.mode == "yolo":
+            await run_yolo_game(websocket)
+        else:
+            await run_color_game(websocket)
