@@ -3,13 +3,16 @@ import numpy as np
 import base64
 import time
 
+# --- Hardcoded IP camera URL ---
+IPCAM_URL = "http://192.168.137.30:4747/video"  # <-- Change to your webcam's IP
+
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
 green_upper = np.array([90, 255, 255])
 
-# Define color range for the blue ball
-ball_lower = np.array([100, 100, 100])
-ball_upper = np.array([130, 255, 255])
+# Define color range for the light blue ball (replace red)
+ball_lower = np.array([85, 80, 120])    # Lower HSV for light blue
+ball_upper = np.array([105, 255, 255])  # Upper HSV for light blue
 
 adaptive_green_threshold_low = 80
 adaptive_learning_rate = 0.01
@@ -56,6 +59,22 @@ class GameSession:
         self.last_wanted_cup_idx = None
         self.last_moved_cup_idx = None
         self.last_ball_under_cup_idx = None
+        self.cap = cv2.VideoCapture(IPCAM_URL)
+        time.sleep(1)  # Give the IP camera time to initialize
+
+    def get_ipcam_frame(self):
+        if not self.cap or not self.cap.isOpened():
+            # Try to reopen if closed
+            self.cap = cv2.VideoCapture(IPCAM_URL)
+            # time.sleep(1)
+            if not self.cap.isOpened():
+                return None
+        # Flush buffer (optional, for IP cams)
+        for _ in range(2):
+            ret, frame = self.cap.read()
+        if not ret or frame is None or frame.size == 0:
+            return None
+        return frame
 
     def detect_cups(self, frame):
         update_green_threshold(frame)
@@ -134,11 +153,11 @@ class GameSession:
         return (x + w/2 > 0 and y + h/2 > 0 and 
                 x + w/2 < frame_width and y + h/2 < frame_height)
 
-    def process_frame(self, frame_bytes):
-        np_arr = np.frombuffer(frame_bytes, np.uint8)
-        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    def process_frame(self, frame_bytes=None):
+        # Use persistent cap object
+        frame = self.get_ipcam_frame()
         if frame is None:
-            return {"error": "Invalid frame"}
+            return {"error": "Could not retrieve frame from IP camera"}
         frame = cv2.resize(frame, (640, 480))
         raw_frame = frame.copy()
         frame_height, frame_width = frame.shape[:2]
@@ -267,3 +286,7 @@ class GameSession:
             "processed_frame": processed_b64,
         }
         return resp
+
+    def __del__(self):
+        if hasattr(self, "cap") and self.cap is not None:
+            self.cap.release()

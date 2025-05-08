@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 opencv-python
-numpy
+numpy==1.26.4
 websockets
 opencv-contrib-python
 pygame
