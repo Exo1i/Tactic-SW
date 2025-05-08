@@ -106,7 +106,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             except Exception as e:
                 # Optionally log the error
                 await websocket.close()
-                return
+                return  # <-- Add return here to prevent further sends
         while True:
             data = await websocket.receive()
             try:
@@ -148,11 +148,25 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     result = {"status": "error", "message": "Invalid message format"}
                 await websocket.send_json(result)
             except Exception as e:
-                result = {"status": "error", "message": str(e)}
-                await websocket.send_json(result)
+                # Only try to send error if websocket is open
+                try:
+                    await websocket.send_json({"status": "error", "message": str(e)})
+                except Exception:
+                    pass
+                # Optionally close the websocket and break the loop
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+                break  # <-- Exit the receive loop after closing
     except WebSocketDisconnect:
-        if game_session and hasattr(game_session, 'cleanup'):
-            game_session.cleanup()
+        if game_session:
+            # Release camera connection for shell-game and similar games
+            if hasattr(game_session, "stop"):
+                game_session.stop()
+            # Optionally call cleanup if it exists
+            if hasattr(game_session, 'cleanup'):
+                game_session.cleanup()
 
 # Helper to support both sync and async process_frame
 async def maybe_await(func, *args, **kwargs):

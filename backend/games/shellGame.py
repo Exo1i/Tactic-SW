@@ -4,7 +4,7 @@ import base64
 import time
 
 # --- Hardcoded IP camera URL ---
-IPCAM_URL = "http://192.168.137.30:4747/video"  # <-- Change to your webcam's IP
+IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
 
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
@@ -59,10 +59,21 @@ class GameSession:
         self.last_wanted_cup_idx = None
         self.last_moved_cup_idx = None
         self.last_ball_under_cup_idx = None
+        self.stopped = False
         self.cap = cv2.VideoCapture(IPCAM_URL)
         time.sleep(1)  # Give the IP camera time to initialize
 
+    def stop(self):
+        """Explicitly stop and release the camera."""
+        if not self.stopped:
+            self.stopped = True
+            if self.cap is not None:
+                self.cap.release()
+                self.cap = None
+
     def get_ipcam_frame(self):
+        if self.stopped:
+            return None
         if not self.cap or not self.cap.isOpened():
             # Try to reopen if closed
             self.cap = cv2.VideoCapture(IPCAM_URL)
@@ -288,5 +299,5 @@ class GameSession:
         return resp
 
     def __del__(self):
-        if hasattr(self, "cap") and self.cap is not None:
-            self.cap.release()
+        self.stop()
+
