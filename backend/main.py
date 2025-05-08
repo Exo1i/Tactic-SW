@@ -1,169 +1,140 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+# File: main.py (Modified)
+from typing import Dict, Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-import importlib
-import sys
 import os
 import json
-import inspect
+import logging # For better logging
 
-# Import memory matching backend for color/yolo WebSocket endpoints
-from games import memory_matching_backend
-from games.rubiks_cube_game import RubiksCubeGame
+# Assuming the new game logic is in games/rubiks_cube_game_reimplemented.py
+from games.rubiks_cube_game import RubiksCubeGame  # <-- USE THE NEW CLASS
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Allow frontend dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"], # Allows all methods
+    allow_headers=["*"], # Allows all headers
 )
 
-# Ensure backend/games/tic-tac-toe is in sys.path for dynamic imports (for 'utils', 'alphabeta', etc.)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TICTACTOE_DIR = os.path.join(BASE_DIR, "games", "tic-tac-toe")
-if TICTACTOE_DIR not in sys.path:
-    sys.path.insert(0, TICTACTOE_DIR)
+# --- Global Game Session Holder ---
+# This is a simple way for HTTP routes to access the WebSocket's game session.
+# For multiple concurrent users, this needs a more robust session management system.
+# For a single-user scenario (one browser tab interacting), this can work.
+rubiks_game_session_holder: Dict[str, Optional[RubiksCubeGame]] = {"session": None}
 
-# Map game_id to module path
-GAME_MODULES = {
-    "shell-game": "games.shellGame",
-    "tic-tac-toe": "games.tic-tac-toe.tictactoe",
-    "rubiks": "games.rubiks_cube_game",
-    "game-2": "games.game2",   # Placeholder, implement games/game2.py
-    "game-3": "games.game3",   # Placeholder, implement games/game3.py
-    "game-4": "games.game4",   # Placeholder, implement games/game4.py
-    "game-5": "games.game5",   # Placeholder, implement games/game5.py
-    "memory-matching": "games.memory_matching_backend",
-}
 
-@app.websocket("/ws/{game_id}")
-async def websocket_endpoint(websocket: WebSocket, game_id: str):
+@app.websocket("/ws/rubiks") # Only one endpoint for Rubik's for now
+async def websocket_rubiks_endpoint(websocket: WebSocket):
     await websocket.accept()
-    game_session = None
-    module_path = GAME_MODULES.get(game_id)
-    if not module_path:
-        await websocket.send_json({"status": "error", "message": "Unknown game"})
-        await websocket.close()
-        return
+    logger.info("WebSocket connection accepted for Rubik's Cube.")
+    
+    game_session = RubiksCubeGame() # Instantiate our new game class
+    rubiks_game_session_holder["session"] = game_session # Store for HTTP routes
 
     try:
-        game_module = importlib.import_module(module_path)
-        # Special handling for Rubik's Cube
-        if game_id == "rubiks":
-            # Wait for initial config message (optional)
-            first_message = await websocket.receive()
-            config = None
-            first_frame_bytes = None
-            if "text" in first_message:
-                try:
-                    config = json.loads(first_message["text"])
-                except Exception:
-                    config = None
-            elif "bytes" in first_message:
-                first_frame_bytes = first_message["bytes"]
-            if config is not None:
-                game_session = RubiksCubeGame(config)
-            else:
-                game_session = RubiksCubeGame()
-        else:
-            # Default: try to receive config as first message, else treat as frame
-            first_message = await websocket.receive()
-            config = None
-            first_frame_bytes = None
-            if "text" in first_message:
-                try:
-                    config = json.loads(first_message["text"])
-                except Exception:
-                    config = None
-            elif "bytes" in first_message:
-                first_frame_bytes = first_message["bytes"]
-            if config is not None:
-                game_session = game_module.GameSession(config)
-            else:
-                game_session = game_module.GameSession()
-    except Exception as e:
-        await websocket.send_json({"status": "error", "message": f"Failed to load game: {e}"})
-        await websocket.close()
-        return
+        # Send initial state
+        await websocket.send_json(game_session.get_state())
 
-    # Special handling for memory-matching: run full game logic
-    if game_id == "memory-matching":
-        await game_session.run_game(websocket)
-        return
-
-    try:
-        # If first message was a frame, process it before entering loop
-        if game_id == "rubiks" and 'first_frame_bytes' in locals() and first_frame_bytes is not None:
-            result = game_session.process_frame(first_frame_bytes)
-            await websocket.send_json(result)
-        elif 'first_frame_bytes' in locals() and first_frame_bytes is not None:
-            result = await maybe_await(game_session.process_frame, first_frame_bytes)
-            await websocket.send_json(result)
         while True:
             data = await websocket.receive()
-            try:
-                if "bytes" in data:
-                    # For games that process video frames (like Rubik's cube)
-                    if game_id == "rubiks":
-                        result = game_session.process_frame(data["bytes"])
-                    else:
-                        result = await maybe_await(game_session.process_frame, data["bytes"])
-                elif "text" in data:
-                    config = {}
-                    try:
-                        config = json.loads(data["text"])
-                    except:
-                        pass
-                    if game_id == "rubiks":
-                        # Handle Rubik's cube specific commands
-                        if "mode" in config:
-                            if config["mode"] == "calibrating":
-                                game_session.mode = "calibrating"
-                                game_session.calibration_step = 0
-                            elif config["mode"] == "scanning":
-                                game_session.start_scanning()
-                            elif config["mode"] == "scrambling":
-                                game_session.scramble_cube()
-                            elif config["mode"] == "idle":
-                                game_session.stop()
-                        elif "action" in config:
-                            if config["action"] == "calibrate":
-                                game_session.calibrate_color()
-                            elif config["action"] == "scan":
-                                game_session.capture_scan()
-                            elif config["action"] == "stop":
-                                game_session.stop()
-                        result = game_session.get_state()
-                    else:
-                        result = await maybe_await(game_session.process_command, config)
-                else:
-                    result = {"status": "error", "message": "Invalid message format"}
-                await websocket.send_json(result)
-            except Exception as e:
-                result = {"status": "error", "message": str(e)}
-                await websocket.send_json(result)
+            if "bytes" in data:
+                frame_bytes = data["bytes"]
+                # logger.debug(f"Received frame bytes, size: {len(frame_bytes)}")
+                result_state = game_session.process_frame(frame_bytes)
+                await websocket.send_json(result_state)
+            elif "text" in data:
+                # Text data from WebSocket is not used by current frontend for Rubik's commands
+                # Commands come via HTTP. If you plan to send commands via WS text:
+                try:
+                    command_data = json.loads(data["text"])
+                    logger.info(f"Received text command via WebSocket: {command_data}")
+                    # Example: handle_ws_command(game_session, command_data)
+                    # For now, just send back current state if WS text is received.
+                    await websocket.send_json(game_session.get_state())
+                except json.JSONDecodeError:
+                    logger.warning("Received invalid JSON text via WebSocket.")
+                    await websocket.send_json({"error": "Invalid JSON command"})
+            
     except WebSocketDisconnect:
-        if game_session and hasattr(game_session, 'cleanup'):
+        logger.info("WebSocket disconnected for Rubik's Cube.")
+    except Exception as e:
+        logger.error(f"Error in Rubik's WebSocket handler: {e}", exc_info=True)
+        try: # Attempt to send error to client before closing
+            await websocket.send_json({"mode": "error", "error_message": str(e)})
+        except: pass # If sending fails, nothing more to do
+    finally:
+        if game_session:
             game_session.cleanup()
+        rubiks_game_session_holder["session"] = None # Clear the session
+        logger.info("Rubik's Cube game session cleaned up.")
 
-# Helper to support both sync and async process_frame
-async def maybe_await(func, *args, **kwargs):
-    res = func(*args, **kwargs)
-    if inspect.isawaitable(res):
-        return await res
-    return res
+# --- HTTP Endpoints for Commands (as per frontend) ---
+# These need to access the game_session created by the WebSocket.
 
-# Add endpoints for memory matching game (color and yolo)
-@app.websocket("/ws/memory-matching/color")
-async def ws_memory_matching_color(websocket: WebSocket):
-    await memory_matching_backend.stream_game(websocket, "color")
+def get_active_game_session() -> RubiksCubeGame:
+    session = rubiks_game_session_holder.get("session")
+    if not session:
+        raise HTTPException(status_code=409, detail="No active Rubik's Cube game session. Connect via WebSocket first.")
+    return session
 
-@app.websocket("/ws/memory-matching/yolo")
-async def ws_memory_matching_yolo(websocket: WebSocket):
-    await memory_matching_backend.stream_game(websocket, "yolo")
+@app.post("/start_calibration")
+async def api_start_calibration():
+    game = get_active_game_session()
+    game.start_calibration()
+    return game.get_state() # Return new state
+
+@app.post("/capture_calibration_color")
+async def api_capture_color():
+    game = get_active_game_session()
+    game.capture_calibration_color()
+    return game.get_state()
+
+@app.post("/save_calibration")
+async def api_save_calibration():
+    game = get_active_game_session()
+    game.save_calibration()
+    return game.get_state()
+
+@app.post("/reset_calibration")
+async def api_reset_calibration():
+    game = get_active_game_session()
+    game.reset_calibration()
+    return game.get_state()
+
+@app.post("/start_solve") # Frontend uses this to initiate scanning then solving
+async def api_start_solve():
+    game = get_active_game_session()
+    game.start_solve() # This now sets mode to "scanning"
+    return game.get_state()
+
+@app.post("/stop_and_reset")
+async def api_stop_reset():
+    game = get_active_game_session()
+    game.stop_and_reset()
+    return game.get_state()
+
+@app.post("/start_scramble")
+async def api_start_scramble():
+    game = get_active_game_session()
+    game.start_scramble()
+    # Scrambling can take time, state might change during/after.
+    # _send_arduino_command might set mode to idle after scramble.
+    return game.get_state() # Return state immediately after initiating
+
+# --- (Your other game endpoints like memory-matching can remain if needed) ---
+# from games import memory_matching_backend
+# @app.websocket("/ws/memory-matching/color") ...
+# @app.websocket("/ws/memory-matching/yolo") ...
 
 if __name__ == "__main__":
+    # Make sure 'games' directory is in PYTHONPATH or accessible
+    # For Uvicorn: uvicorn main:app --reload --host 0.0.0.0 --port 8000
     uvicorn.run(app, host="0.0.0.0", port=8000)
