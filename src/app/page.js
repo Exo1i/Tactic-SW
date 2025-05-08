@@ -6,7 +6,7 @@ const games = [
   { name: "Tic Tac Toe", id: "tic-tac-toe" },
   { name: "Rubik's Game", id: "rubiks-game" },
   { name: "Memory Matching", id: "memory-matching" },
-  { name: "Game 4", id: "game-4" },
+  { name: "Target Shooter", id: "shooter-game" },
   { name: "Game 5", id: "game-5" },
 ];
 

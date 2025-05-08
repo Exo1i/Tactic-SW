@@ -37,6 +37,7 @@ GAME_MODULES = {
     "game-4": "games.game4",   # Placeholder, implement games/game4.py
     "game-5": "games.game5",   # Placeholder, implement games/game5.py
     "memory-matching": "games.memory_matching_backend",
+    "shooter-game": "games.Shooter.TargetDetection.temp",  # <-- Add this line
 }
 
 @app.websocket("/ws/{game_id}")
@@ -76,10 +77,18 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             if "text" in first_message:
                 try:
                     config = json.loads(first_message["text"])
-                except Exception:
+                    
+                    # Special handling for shooter-game init message
+                    if game_id == "shooter-game" and config.get("action") == "start":
+                        print(f"Shooter Game: Received start command with config: {config}")
+                        # The config will be passed to GameSession constructor
+                        
+                except Exception as e:
+                    print(f"Error parsing config: {e}")
                     config = None
             elif "bytes" in first_message:
                 first_frame_bytes = first_message["bytes"]
+            
             if config is not None:
                 game_session = game_module.GameSession(config)
             else:
@@ -114,14 +123,48 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     # For games that process video frames (like Rubik's cube)
                     if game_id == "rubiks":
                         result = game_session.process_frame(data["bytes"])
+                    elif game_id == "shooter-game":
+                        # Shooter-game returns raw bytes, convert to base64 for frontend
+                        result = await maybe_await(game_session.process_frame, data["bytes"])
+                        # Convert frame bytes to base64 for frontend compatibility
+                        import base64
+                        frame_b64 = None
+                        if result.get("frame"):
+                            frame_b64 = base64.b64encode(result["frame"]).decode("utf-8")
+                        await websocket.send_json({
+                            "status": result.get("status", "ok"),
+                            "processed_frame": frame_b64,
+                            "balloons_info": result.get("balloons_info", []),
+                        })
+                        continue  # Already sent, skip default send
                     else:
                         result = await maybe_await(game_session.process_frame, data["bytes"])
                 elif "text" in data:
                     config = {}
                     try:
                         config = json.loads(data["text"])
-                    except:
+                        
+                        # Special handling for shooter-game commands
+                        if game_id == "shooter-game":
+                            if config.get("action") == "stop":
+                                print(f"Shooter Game: Received stop command")
+                                if hasattr(game_session, "stop"):
+                                    game_session.stop()
+                                await websocket.send_json({"status": "stopped"})
+                                await websocket.close()
+                                break
+                            elif config.get("action") == "emergency":
+                                print(f"Shooter Game: Received EMERGENCY command")
+                                if hasattr(game_session, "stop"):
+                                    game_session.stop()
+                                await websocket.send_json({"status": "emergency_stopped"})
+                                await websocket.close()
+                                break
+                                
+                    except Exception as e:
+                        print(f"Error parsing message: {e}")
                         pass
+                        
                     if game_id == "rubiks":
                         # Handle Rubik's cube specific commands
                         if "mode" in config:

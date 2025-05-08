@@ -83,8 +83,7 @@ export default function TicTacToePage() {
           setProcessedFrame(`data:image/jpeg;base64,${data.processed_frame}`);
         if (data.bird_view_frame)
           setBirdViewFrame(`data:image/jpeg;base64,${data.bird_view_frame}`);
-        else
-          setBirdViewFrame(null); // Clear if no bird view available
+        else setBirdViewFrame(null); // Clear if no bird view available
       } catch {
         setOutput(event.data);
       }
@@ -241,7 +240,9 @@ export default function TicTacToePage() {
             <input
               type="text"
               value={tttArgs.model}
-              onChange={e => setTttArgs(a => ({ ...a, model: e.target.value }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({ ...a, model: e.target.value }))
+              }
               className="w-full p-2 border rounded"
             />
           </div>
@@ -252,7 +253,9 @@ export default function TicTacToePage() {
               step="0.1"
               min="1"
               value={tttArgs.zoom}
-              onChange={e => setTttArgs(a => ({ ...a, zoom: parseFloat(e.target.value) }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({ ...a, zoom: parseFloat(e.target.value) }))
+              }
               className="w-full p-2 border rounded"
             />
           </div>
@@ -263,7 +266,12 @@ export default function TicTacToePage() {
               step="0.1"
               min="0.1"
               value={tttArgs.check_interval}
-              onChange={e => setTttArgs(a => ({ ...a, check_interval: parseFloat(e.target.value) }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({
+                  ...a,
+                  check_interval: parseFloat(e.target.value),
+                }))
+              }
               className="w-full p-2 border rounded"
             />
           </div>
@@ -278,7 +286,7 @@ export default function TicTacToePage() {
         {appliedCameraSettings.useIpCamera && (
           <div className="mb-2 text-red-600 text-sm">
             Note: IP camera streams must support MJPEG and allow CORS. If you
-            see a blank image, check your camera's settings.
+            see a blank image, check your cameras settings.
           </div>
         )}
         {!window.isSecureContext && (
@@ -286,9 +294,7 @@ export default function TicTacToePage() {
             Warning: Device camera access requires HTTPS in most browsers.
           </div>
         )}
-        <h2 className="text-xl font-semibold mb-4">
-          Playing: Tic Tac Toe
-        </h2>
+        <h2 className="text-xl font-semibold mb-4">Playing: Tic Tac Toe</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="flex flex-col items-center">
             <div className="mb-2 text-center font-medium">Raw Camera</div>
@@ -330,9 +336,7 @@ export default function TicTacToePage() {
             />
           </div>
           <div className="flex flex-col items-center">
-            <div className="mb-2 text-center font-medium">
-              Bird's Eye View
-            </div>
+            <div className="mb-2 text-center font-medium">Birds Eye View</div>
             <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center">
               {birdViewFrame ? (
                 <img
