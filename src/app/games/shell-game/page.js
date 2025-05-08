@@ -32,9 +32,13 @@ export default function ShellGamePage() {
   // Add a ref to track last sent time for FPS limiting
   const lastSentRef = useRef(0);
   // Set your desired FPS here (e.g., 10 or 20)
-  const minFrameInterval = 50; // ms (10 FPS). Use 50 for 20 FPS.
+  const minFrameInterval = 30; // ms (10 FPS). Use 50 for 20 FPS.
+
+  const [isGameStarted, setIsGameStarted] = useState(false);
 
   useEffect(() => {
+    if (!isGameStarted) return; // Only run effect if game started
+
     let stopped = false;
 
     const initCamera = async () => {
@@ -127,7 +131,7 @@ export default function ShellGamePage() {
         videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [gameId, appliedCameraSettings]);
+  }, [gameId, appliedCameraSettings, isGameStarted]);
 
   const handleCameraSettingsChange = (newSettings) => {
     setCameraSettings(newSettings);
@@ -221,6 +225,27 @@ export default function ShellGamePage() {
             >
               Camera Settings
             </button>
+            {!isGameStarted ? (
+              <button
+                onClick={() => setIsGameStarted(true)}
+                className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700"
+              >
+                Start Game
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  setIsGameStarted(false);
+                  setStatus("Disconnected");
+                  setOutput(null);
+                  setRawFrame(null);
+                  setProcessedFrame(null);
+                }}
+                className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
+              >
+                Stop Game
+              </button>
+            )}
           </div>
         </div>
         {appliedCameraSettings.useIpCamera && (
