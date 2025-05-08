@@ -100,8 +100,13 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             result = game_session.process_frame(first_frame_bytes)
             await websocket.send_json(result)
         elif 'first_frame_bytes' in locals() and first_frame_bytes is not None:
-            result = await maybe_await(game_session.process_frame, first_frame_bytes)
-            await websocket.send_json(result)
+            try:
+                result = await maybe_await(game_session.process_frame, first_frame_bytes)
+                await websocket.send_json(result)
+            except Exception as e:
+                # Optionally log the error
+                await websocket.close()
+                return
         while True:
             data = await websocket.receive()
             try:
