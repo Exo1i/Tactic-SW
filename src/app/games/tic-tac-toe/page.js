@@ -28,7 +28,7 @@ export default function TicTacToePage() {
   const [tttArgs, setTttArgs] = useState({
     model: "games/tic-tac-toe/data/model.h5",
     zoom: 0.5, // Changed from 1.0 to 0.5 for a wider view
-    check_interval: 5.0,
+    check_interval: 10.0,
   });
   const [tttStarted, setTttStarted] = useState(false);
 
