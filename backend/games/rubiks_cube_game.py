@@ -1,3 +1,5 @@
+# games/rubiks_cube_game.py
+
 from typing import Optional, Dict, Any
 import serial
 import time
@@ -12,1217 +14,1236 @@ from collections import Counter
 
 class RubiksCubeGame:
     def __init__(self, config: Dict[str, Any] = None):
-        # Initialize state variables
+        self.config = config or {}
+        
+        # Standard operational variables
         self.mode = "idle"
         self.status_message = "Ready"
         self.error_message = None
+        self.stop_requested: bool = False
+        self.serial_connection: Optional[serial.Serial] = None
+        self.websocket: Optional[Any] = None
+        self.last_motor_move_time: float = 0.0
+        
+        # Frame processing & detection parameters
+        self.WINDOW_SIZE: tuple = self.config.get('window_size', (320, 240))
+        self.current_frame_for_detection: Optional[np.ndarray] = None
+        self.prev_contour_scan: Optional[np.ndarray] = None # For stability check in scanning
+
+        # New: Zoom and Distance control parameters
+        self.zoom_crop_factor: float = float(self.config.get('zoom_crop_factor', 1.0))
+        self.relative_detection_distance: float = float(self.config.get('relative_detection_distance', 1.0))
+        
+        # Base contour area thresholds (for nominal distance)
+        self.BASE_MIN_CONTOUR_AREA: int = self.config.get('base_min_contour_area', 2000) # Adjusted base min
+        self.BASE_MAX_CONTOUR_AREA: int = self.config.get('base_max_contour_area', 80000) # Adjusted base max
+        
+        # Effective contour area thresholds, calculated based on relative_detection_distance
+        self.MIN_CONTOUR_AREA: int = 0 # Will be calculated
+        self.MAX_CONTOUR_AREA: int = 0 # Will be calculated
+        self._update_effective_contour_areas() # Initial calculation
+
+        # Calibration variables
         self.calibration_step = 0
+        self.last_valid_grid_info_for_calibration: Optional[tuple] = None
+        self.last_processed_frame_for_calibration: Optional[np.ndarray] = None
+        self.calibration_roi_scale: float = float(self.config.get('calibration_roi_scale', 0.12))
+        self.COLOR_NAMES_CALIBRATION: list = ["W", "R", "G", "Y", "O", "B"] # Standard order
+
+        # Scanning variables
         self.current_scan_idx = 0
+        self.SCAN_COOLDOWN: float = float(self.config.get('scan_cooldown', 0.5))
+        self.MOTOR_STABILIZATION_TIME: float = float(self.config.get('motor_stabilization_time', 0.7))
+        self.STABILITY_THRESHOLD: int = self.config.get('stability_threshold', 3)
+        self.stability_counter: int = 0
+        self.last_scan_time: float = time.time()
+        self.prev_face_colors_scan: Optional[list] = None
+        self.u_scans: list = [[] for _ in range(12)]
+        self.rotation_sequence: list = self.config.get('rotation_sequence', [
+            "", "R L'", "B F'", "R L'", "B F'", "R L'", "B F'", "R L'", "B F'", "R L'", "B F'", "R L'"
+        ])
+
+        # Solving variables
+        self.solution: Optional[str] = None
         self.current_solve_move_index = 0
         self.total_solve_moves = 0
-        self.solution = None
-        self.stop_requested = False
-        self.serial_connection = None
-        self.last_valid_grid = None
-        self.last_processed_frame = None
         
-        # Constants
-        self.WINDOW_SIZE = (640, 480)
-        self.SCAN_COOLDOWN = 1
-        self.MOTOR_STABILIZATION_TIME = 1
-        self.STABILITY_THRESHOLD = 3
-        self.MIN_CONTOUR_AREA = 4000
-        self.MAX_CONTOUR_AREA = 60000
-        self.COLOR_NAMES = ["W", "R", "G", "Y", "O", "B"]
-        
-        # Rotation sequence for scanning
-        self.rotation_sequence = [
-            "",        # Scan 1: Initial U face
-            "R L'",    # Scan 2
-            "B F'",    # Scan 3
-            "R L'",    # Scan 4
-            "B F'",    # Scan 5
-            "R L'",    # Scan 6
-            "B F'",    # Scan 7
-            "R L'",    # Scan 8
-            "B F'",    # Scan 9
-            "R L'",    # Scan 10
-            "B F'",    # Scan 11
-            "R L'"     # Scan 12
-        ]
-        
-        # Load configuration
-        self.config = config or {}
-        self.serial_port = self.config.get('serial_port', 'COM7')
-        self.serial_baudrate = self.config.get('serial_baudrate', 9600)
-        
-        # Initialize Arduino connection
+        # Serial communication
+        self.serial_port: str = self.config.get('serial_port', 'COM9')
+        self.serial_baudrate: int = self.config.get('serial_baudrate', 9600)
         self.init_serial()
-        
-        # Load or set default color ranges
-        self.color_ranges = self.load_color_ranges()
+
+        # Color detection
+        self.color_ranges: Dict[str, list] = self._load_color_ranges_from_file()
         if not self.color_ranges:
+            print("Using default color ranges for STICKERLESS CUBE.")
             self.color_ranges = {
-                "W": (np.array([0, 0, 200]), np.array([180, 30, 255])),      # White
-                "R": [(np.array([0, 150, 100]), np.array([10, 255, 255])),   # Red (lower range)
-                     (np.array([170, 150, 100]), np.array([180, 255, 255]))], # Red (upper range)
-                "G": (np.array([45, 50, 50]), np.array([85, 255, 255])),     # Green
-                "Y": (np.array([20, 100, 100]), np.array([35, 255, 255])),   # Yellow
-                "O": (np.array([5, 150, 150]), np.array([20, 255, 255])),    # Orange
-                "B": (np.array([100, 100, 50]), np.array([130, 255, 255]))   # Blue
+                "W": [(np.array([0, 0, 150]), np.array([180, 70, 255]))],
+                "R": [(np.array([0, 80, 70]), np.array([10, 255, 255])),
+                      (np.array([160, 80, 70]), np.array([179, 255, 255]))],
+                "G": [(np.array([35, 60, 60]), np.array([85, 255, 255]))],
+                "Y": [(np.array([18, 80, 100]), np.array([35, 255, 255]))],
+                "O": [(np.array([3, 80, 70]), np.array([20, 255, 255]))],
+                "B": [(np.array([80, 60, 60]), np.array([135, 255, 255]))]
             }
+        else:
+            print("Color ranges loaded from file.")
         
-        # Initialize scanning variables
-        self.last_scan_time = time.time()
-        self.stability_counter = 0
-        self.prev_face_colors = None
-        self.u_scans = [[] for _ in range(12)]
-    
+        # Initial validation of factors
+        self.set_zoom_crop_factor(self.zoom_crop_factor) # Apply validation
+        self.set_relative_detection_distance(self.relative_detection_distance) # Apply validation and calc areas
+
+    def _update_effective_contour_areas(self):
+        """Calculates MIN_CONTOUR_AREA and MAX_CONTOUR_AREA based on base values and distance factor."""
+        if self.relative_detection_distance <= 0: # Prevent division by zero or sqrt of negative
+            squared_factor = 0.01 # A very small factor if input is invalid
+        else:
+            squared_factor = self.relative_detection_distance ** 2
+        
+        self.MIN_CONTOUR_AREA = int(self.BASE_MIN_CONTOUR_AREA / squared_factor)
+        self.MAX_CONTOUR_AREA = int(self.BASE_MAX_CONTOUR_AREA / squared_factor)
+        
+        # Sanity checks
+        self.MIN_CONTOUR_AREA = max(100, self.MIN_CONTOUR_AREA) # Min practical area
+        self.MAX_CONTOUR_AREA = max(self.MIN_CONTOUR_AREA + 100, self.MAX_CONTOUR_AREA) # Ensure max > min
+        
+        # Max area shouldn't exceed total pixels in WINDOW_SIZE (though unlikely with reasonable factors)
+        total_pixels = self.WINDOW_SIZE[0] * self.WINDOW_SIZE[1]
+        self.MAX_CONTOUR_AREA = min(self.MAX_CONTOUR_AREA, int(total_pixels * 0.95)) # Cap at 95% of window area
+
+    def set_zoom_crop_factor(self, factor: float):
+        original_factor = factor
+        if factor < 1.0:
+            factor = 1.0
+            if original_factor != factor:
+                 print(f"Info: Zoom crop factor ({original_factor}) corrected to {factor} (min 1.0).")
+        elif factor > 10.0: # Max 10x zoom, can be adjusted
+            factor = 10.0
+            if original_factor != factor:
+                print(f"Info: Zoom crop factor ({original_factor}) corrected to {factor} (max 10.0).")
+            
+        self.zoom_crop_factor = factor
+        self.status_message = f"Zoom crop factor set to {self.zoom_crop_factor:.2f}"
+        # No need to print here, get_state will propagate it, or can be logged if desired.
+
+    def set_relative_detection_distance(self, factor: float):
+        original_factor = factor
+        if factor <= 0.1: # Prevent division by zero or excessively small factor
+            factor = 0.1
+            if original_factor != factor:
+                print(f"Info: Relative detection distance ({original_factor}) corrected to {factor} (min 0.1).")
+        elif factor > 5.0: # Prevent excessively large factor (making areas too small)
+            factor = 5.0
+            if original_factor != factor:
+                print(f"Info: Relative detection distance ({original_factor}) corrected to {factor} (max 5.0).")
+
+        self.relative_detection_distance = factor
+        self._update_effective_contour_areas() # Recalculate effective contour areas
+        self.status_message = (f"Detection distance factor: {self.relative_detection_distance:.2f}. "
+                               f"Areas: {self.MIN_CONTOUR_AREA}-{self.MAX_CONTOUR_AREA}")
+        # No need to print here.
+
+    # --- init_serial, set_websocket, send_arduino_command, _send_compound_move ---
+    # (Keep these methods as they were in your last confirmed good version)
     def init_serial(self) -> bool:
-        """Initialize serial connection to Arduino."""
         try:
             if self.serial_connection and self.serial_connection.is_open:
                 self.serial_connection.close()
-            
             self.serial_connection = serial.Serial(self.serial_port, self.serial_baudrate, timeout=1)
-            time.sleep(2)  # Wait for Arduino to reset
+            time.sleep(2) # Wait for Arduino to initialize/reset
+            self.status_message = f"Serial connected: {self.serial_port}"
+            print(self.status_message)
+            self.error_message = None # Clear previous serial errors
             return True
-        except Exception as e:
+        except serial.SerialException as e: 
             self.error_message = f"Serial Error: {str(e)}"
-            self.status_message = f"Error connecting to Arduino on {self.serial_port}"
+            self.status_message = f"Failed to connect: {self.serial_port}"
             self.serial_connection = None
+            print(self.error_message)
             return False
-    
-    def send_arduino_command(self, cmd: str) -> bool:
-        """Send command to Arduino and wait for acknowledgment."""
+        
+    def set_websocket(self, websocket: Any): # Use Any for WebSocket type if not importing FastAPI types
+        self.websocket = websocket
+        print("WebSocket instance set for RubiksCubeGame.")
+        
+    def send_arduino_command(self, cmd: str, wait_for_ack: bool = True, is_solution: bool = False) -> bool:
+        if not self.serial_connection or not self.serial_connection.is_open:
+            print(f"Serial not connected. Command '{cmd}' not sent (SIMULATING).")
+            simulated_delay = 0
+            if is_solution: simulated_delay = 3 + cmd.count(' ') * 0.1 
+            elif " " in cmd or len(cmd) > 2 : simulated_delay = 0.5 + cmd.count(' ') * 0.2 
+            else: simulated_delay = self.MOTOR_STABILIZATION_TIME 
+            time.sleep(simulated_delay)
+            self.last_motor_move_time = time.time()
+            if is_solution: 
+                self.mode = "idle"
+                self.status_message = "Solution SIMULATED as completed."
+                self.solution = None 
+                self.current_solve_move_index = self.total_solve_moves if self.total_solve_moves > 0 else 0
+            return True
+
         try:
-            if self.serial_connection and self.serial_connection.is_open:
-                print(f"\nSending to Arduino: {cmd}")
-                self.serial_connection.write(f"{cmd}\n".encode())
-                self.serial_connection.flush()
-                
-                # Wait for acknowledgment with a longer timeout for solutions
-                start_time = time.time()
-                timeout = 30 if len(cmd.split()) > 10 else 10  # Longer timeout for solutions
-                
-                while True:
-                    if time.time() - start_time > timeout:
-                        print(f"Timeout waiting for Arduino response after {timeout} seconds")
-                        return False
-                    
-                    if self.serial_connection.in_waiting:
-                        response = self.serial_connection.readline().decode().strip()
-                        print(f"Arduino response: {response}")
+            # print(f"Sending to Arduino: {cmd}")
+            self.serial_connection.write(f"{cmd}\n".encode('utf-8'))
+            self.serial_connection.flush() 
+            self.last_motor_move_time = time.time() 
+
+            if not wait_for_ack:
+                return True
+
+            timeout_duration = 90 if is_solution else 15 + cmd.count(' ') * 2 # Adjusted timeouts
+            start_wait_time = time.time()
+            ack_buffer = ""
+
+            while time.time() - start_wait_time < timeout_duration:
+                if self.stop_requested and is_solution: # Allow interruption for solutions
+                    print(f"Stop requested during Arduino command: {cmd}")
+                    self.stop_requested = False # Reset flag
+                    return False # Indicate command was interrupted
+
+                if self.serial_connection.in_waiting > 0:
+                    try:
+                        byte_chunk = self.serial_connection.read(self.serial_connection.in_waiting)
+                        ack_buffer += byte_chunk.decode("latin-1", errors='replace')
                         
-                        # For long solutions, keep reading until we get completion
-                        if "completed" in response.lower() or "executed" in response.lower():
-                            print("Command execution completed")
-                            # Reset to idle mode after solution is complete
-                            if len(cmd.split()) > 10:  # If this was a solution
-                                print("Solution completed, resetting to idle mode")
-                                self.mode = "idle"
-                                self.status_message = "Solution completed - Ready for next command"
-                                self.current_solve_move_index = 0
-                                self.total_solve_moves = 0
-                                self.solution = None
-                            return True
-                        elif "error" in response.lower():
-                            print(f"Arduino reported error: {response}")
-                            return False
-                    
-                    # Small delay to prevent busy waiting
-                    time.sleep(0.1)
-            else:
-                print("Serial connection not available")
-                return False
-                
-        except Exception as e:
-            self.error_message = f"Arduino command error: {str(e)}"
-            print(f"Error sending command: {e}")
+                        while '\n' in ack_buffer:
+                            line, ack_buffer = ack_buffer.split('\n', 1)
+                            line = line.strip()
+                            if not line: continue
+
+                            if "completed" in line.lower() or "executed" in line.lower():
+                                print(f"Command '{cmd[:30]}...' ACKNOWLEDGED as completed by Arduino.")
+                                if is_solution:
+                                    print("SOLUTION execution reported complete by Arduino.")
+                                    self.mode = "idle"
+                                    self.status_message = "Solution completed successfully."
+                                    self.solution = None 
+                                    self.current_solve_move_index = self.total_solve_moves if self.total_solve_moves > 0 else 0
+                                return True
+                            elif "error" in line.lower():
+                                self.error_message = f"Arduino error for '{cmd[:30]}...': {line}"
+                                print(self.error_message)
+                                return False
+                    except Exception as e: 
+                        print(f"Error reading/decoding from Arduino for '{cmd[:30]}...': {e}. Buffer: {ack_buffer}")
+                        ack_buffer = "" 
+                time.sleep(0.02) 
+
+            self.error_message = f"TIMEOUT waiting for Arduino ack for '{cmd[:30]}...' (waited {timeout_duration}s)."
+            print(self.error_message)
             return False
-    
-    def load_color_ranges(self, filename="color_ranges.json"):
-        """Load color ranges from a JSON file."""
+        except serial.SerialTimeoutException: 
+            self.error_message = f"Serial write timeout for command '{cmd[:30]}...'. Check connection."
+            print(self.error_message)
+            self.init_serial() 
+            return False
+        except Exception as e:
+            self.error_message = f"EXCEPTION sending Arduino command '{cmd[:30]}...': {type(e).__name__} - {e}"
+            print(self.error_message)
+            self.init_serial() 
+            return False
+
+    def _send_compound_move(self, move: str):
+        if move:
+            self.send_arduino_command(move, wait_for_ack=True)
+
+
+    def process_frame(self, frame_data: bytes) -> Dict[str, Any]:
+        try:
+            nparr = np.frombuffer(frame_data, np.uint8)
+            raw_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if raw_frame is None: raise ValueError("Failed to decode frame data from client.")
+
+            # Store the original raw frame for calibration purposes BEFORE any zoom/crop for processing
+            self.last_processed_frame_for_calibration = raw_frame.copy() 
+            
+            input_frame_for_resize = raw_frame
+            if self.zoom_crop_factor > 1.0 and self.zoom_crop_factor is not None: # Check not None just in case
+                h_orig, w_orig = raw_frame.shape[:2]
+                
+                # Calculate dimensions of the cropped area (smaller than original)
+                crop_w = int(w_orig / self.zoom_crop_factor)
+                crop_h = int(h_orig / self.zoom_crop_factor)
+                
+                # Ensure crop dimensions are at least 1x1
+                crop_w = max(1, crop_w)
+                crop_h = max(1, crop_h)
+
+                # Calculate top-left corner of the crop area to center it
+                start_x = (w_orig - crop_w) // 2
+                start_y = (h_orig - crop_h) // 2
+                
+                # Define end coordinates
+                end_x = start_x + crop_w
+                end_y = start_y + crop_h
+
+                # Ensure crop coordinates are within the bounds of the original frame
+                # (This should be guaranteed if zoom_crop_factor >= 1.0 and crop_w/h are from division)
+                # but explicit clamping is safer.
+                start_x = np.clip(start_x, 0, w_orig -1)
+                start_y = np.clip(start_y, 0, h_orig -1)
+                end_x = np.clip(end_x, start_x + 1, w_orig) # ensure end > start
+                end_y = np.clip(end_y, start_y + 1, h_orig) # ensure end > start
+                
+                if end_y > start_y and end_x > start_x: # Check for valid crop dimensions
+                    input_frame_for_resize = raw_frame[start_y:end_y, start_x:end_x]
+                # else: # If crop dimensions became invalid, input_frame_for_resize remains raw_frame
+                    # print(f"Warning: Invalid crop from zoom. Using original. ({start_x},{start_y})-({end_x},{end_y}) from {w_orig}x{h_orig}")
+
+            # Resize the (potentially cropped) frame to the standard processing window size
+            frame_for_processing = cv2.resize(input_frame_for_resize, self.WINDOW_SIZE, interpolation=cv2.INTER_AREA)
+            
+            self.current_frame_for_detection = frame_for_processing.copy() 
+            display_overlay_frame = frame_for_processing.copy() 
+
+            # --- Rest of the processing logic remains the same ---
+            if self.mode == "calibrating": display_overlay_frame = self._draw_calibration_overlay(display_overlay_frame)
+            elif self.mode == "scanning": display_overlay_frame = self._process_scanning_step(display_overlay_frame) 
+            elif self.mode in ["solving", "scrambling"]: display_overlay_frame = self._draw_solving_overlay(display_overlay_frame)
+            else: 
+                status_to_show = f"Mode: {self.mode.capitalize()}"
+                if self.status_message and self.status_message != status_to_show : status_to_show += f" - {self.status_message}"
+                cv2.putText(display_overlay_frame, status_to_show, (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220,220,80), 1)
+
+            _, buffer = cv2.imencode('.jpg', display_overlay_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            frame_b64 = base64.b64encode(buffer).decode('utf-8')
+            
+            current_state_payload = self.get_state() 
+            current_state_payload["processed_frame"] = frame_b64 
+            return current_state_payload
+        except Exception as e:
+            self.error_message = f"Frame proc error: {type(e).__name__} - {e}"
+            print(f"! CRITICAL ERROR in process_frame: {self.error_message}")
+            # ... (error frame generation remains same) ...
+            error_display_frame = np.zeros((self.WINDOW_SIZE[1], self.WINDOW_SIZE[0], 3), dtype=np.uint8)
+            cv2.putText(error_display_frame, "ERROR", (self.WINDOW_SIZE[0]//2 - 50, self.WINDOW_SIZE[1]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+            _, buffer = cv2.imencode('.jpg', error_display_frame)
+            error_frame_b64 = base64.b64encode(buffer).decode('utf-8')
+            error_state_payload = self.get_state() 
+            error_state_payload["mode"] = "error" 
+            error_state_payload["error_message"] = self.error_message 
+            error_state_payload["status_message"] = "Frame processing failed."
+            error_state_payload["processed_frame"] = error_frame_b64
+            return error_state_payload
+
+    def get_state(self) -> Dict[str, Any]:
+        error_to_send = self.error_message
+        if self.error_message: self.error_message = None 
+
+        return {
+            "mode": self.mode, "status_message": self.status_message, "error_message": error_to_send,
+            "calibration_step": self.calibration_step,
+            "current_color_calibrating": self.COLOR_NAMES_CALIBRATION[self.calibration_step] if self.mode == "calibrating" and self.calibration_step < len(self.COLOR_NAMES_CALIBRATION) else None,
+            "scan_index": self.current_scan_idx,
+            "solve_move_index": self.current_solve_move_index,
+            "total_solve_moves": self.total_solve_moves,
+            "solution_preview": self.solution[:30] + "..." if self.solution and len(self.solution) > 30 else self.solution,
+            "serial_connected": self.serial_connection is not None and self.serial_connection.is_open,
+            "zoom_crop_factor": self.zoom_crop_factor,
+            "relative_detection_distance": self.relative_detection_distance,
+            "effective_min_contour_area": self.MIN_CONTOUR_AREA,
+            "effective_max_contour_area": self.MAX_CONTOUR_AREA,
+        }
+
+    # ... (other methods: _find_best_cube_contour, _detect_corners, _perspective_transform, 
+    #      _load_color_ranges_from_file, _save_color_ranges_to_file,
+    #      _draw_calibration_overlay, _process_scanning_step, _draw_solving_overlay,
+    #      _detect_color, capture_calibration_color, _reset_scan_state, _reset_solve_state,
+    #      _solve_cube_with_kociemba, _is_cube_solved_by_face_colors, _simplify_cube_moves_basic,
+    #      scramble_cube, stop_current_operation, _construct_cube_state_from_scans, _print_cube_state_visual, _validate_kociemba_string
+    #      should be largely unchanged unless they directly used MIN_CONTOUR_AREA or MAX_CONTOUR_AREA fixed values
+    #      and now they will use the dynamic self.MIN_CONTOUR_AREA and self.MAX_CONTOUR_AREA)
+
+    # Ensure _find_best_cube_contour uses self.MIN_CONTOUR_AREA and self.MAX_CONTOUR_AREA
+    def _find_best_cube_contour(self, frame_to_process: np.ndarray) -> Optional[np.ndarray]:
+        processed_bgr = cv2.bilateralFilter(frame_to_process, d=7, sigmaColor=35, sigmaSpace=35)
+        hsv = cv2.cvtColor(processed_bgr, cv2.COLOR_BGR2HSV)
+        combined_mask = np.zeros((frame_to_process.shape[0], frame_to_process.shape[1]), dtype=np.uint8)
+        
+        for _, ranges_list in self.color_ranges.items(): 
+            for lower, upper in ranges_list: 
+                mask_part = cv2.inRange(hsv, lower, upper)
+                combined_mask |= mask_part
+
+        kernel_size = 3
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_contour_approx = None
+        max_area_found = 0 
+
+        # Using the dynamic contour area thresholds
+        # print(f"Debug: Using MinArea: {self.MIN_CONTOUR_AREA}, MaxArea: {self.MAX_CONTOUR_AREA}") # For debugging
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if self.MIN_CONTOUR_AREA < area < self.MAX_CONTOUR_AREA: # <<<< CRITICAL CHANGE HERE
+                peri = cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, 0.03 * peri, True) 
+                
+                if len(approx) >= 4 and len(approx) <= 8: 
+                    x, y, w, h = cv2.boundingRect(approx)
+                    if w == 0 or h == 0: continue
+                    aspect_ratio = float(w) / h
+                    
+                    hull = cv2.convexHull(contour) 
+                    hull_area = cv2.contourArea(hull)
+                    solidity = float(area) / hull_area if hull_area > 0 else 0.0
+
+                    if 0.70 < aspect_ratio < 1.30 and solidity > 0.70:
+                        if area > max_area_found: 
+                            max_area_found = area
+                            best_contour_approx = approx 
+        return best_contour_approx
+
+    def _detect_corners(self, contour_approx: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        if contour_approx is None: return None
+        
+        if len(contour_approx) == 4:
+            corners = contour_approx.reshape(4, 2).astype(np.float32)
+        else:
+            hull = cv2.convexHull(contour_approx)
+            epsilon_hull = 0.05 * cv2.arcLength(hull, True) 
+            approx_hull = cv2.approxPolyDP(hull, epsilon_hull, True)
+            if len(approx_hull) == 4:
+                corners = approx_hull.reshape(4,2).astype(np.float32)
+            else:
+                rect = cv2.minAreaRect(hull) 
+                corners = cv2.boxPoints(rect).astype(np.float32)
+        
+        if self.current_frame_for_detection is None: return None
+        
+        gray = cv2.cvtColor(self.current_frame_for_detection, cv2.COLOR_BGR2GRAY)
+        h_img, w_img = gray.shape[:2]
+
+        for i in range(corners.shape[0]): 
+            corners[i, 0] = np.clip(corners[i, 0], 0, w_img - 1)
+            corners[i, 1] = np.clip(corners[i, 1], 0, h_img - 1)
+        
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
+        try:
+            refined_corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1,-1), criteria) 
+        except cv2.error: 
+            refined_corners = corners 
+
+        for i in range(refined_corners.shape[0]): 
+            refined_corners[i, 0] = np.clip(refined_corners[i, 0], 0, w_img - 1)
+            refined_corners[i, 1] = np.clip(refined_corners[i, 1], 0, h_img - 1)
+        
+        pts_sorted_y = refined_corners[np.argsort(refined_corners[:, 1])] 
+        top_pts = pts_sorted_y[:2][np.argsort(pts_sorted_y[:2, 0])] 
+        bottom_pts = pts_sorted_y[2:][np.argsort(pts_sorted_y[2:, 0])] 
+        ordered_corners = np.array([top_pts[0], top_pts[1], bottom_pts[1], bottom_pts[0]], dtype=np.float32)
+        return ordered_corners
+
+    def _predict_square_length(self, corners: Optional[np.ndarray]) -> int:
+        if corners is None or len(corners) != 4: return 50 
+        dists = [np.linalg.norm(corners[i] - corners[(i + 1) % 4]) for i in range(4)]
+        avg_len = int(np.mean(dists))
+        return max(30, avg_len)
+
+    def _perspective_transform(self, frame_to_transform: np.ndarray, contour_approx: np.ndarray) -> Optional[np.ndarray]:
+        corners = self._detect_corners(contour_approx)
+        if corners is None: return None
+        side_length = self._predict_square_length(corners)
+        if side_length < 20: return None
+        dst_points = np.array([[0,0], [side_length-1,0], [side_length-1,side_length-1], [0,side_length-1]], dtype=np.float32)
+        try:
+            transform_matrix = cv2.getPerspectiveTransform(corners, dst_points)
+            warped_image = cv2.warpPerspective(frame_to_transform, transform_matrix, (side_length, side_length), flags=cv2.INTER_LANCZOS4)
+            return warped_image
+        except cv2.error as e:
+            print(f"! OpenCV Error in perspective transform: {e}")
+            return None
+
+    def _load_color_ranges_from_file(self, filename: str = "color_ranges.json") -> Optional[Dict[str, list]]:
         if os.path.exists(filename):
             try:
                 with open(filename, 'r') as f:
-                    serializable_ranges = json.load(f)
-                return {
-                    color: (np.array(lower), np.array(upper)) 
-                    for color, (lower, upper) in serializable_ranges.items()
-                }
-            except Exception:
-                return None
+                    loaded_data = json.load(f)
+                parsed_ranges = {}
+                for color, ranges_data_list in loaded_data.items(): 
+                    if isinstance(ranges_data_list, list):
+                        parsed_ranges[color] = []
+                        for r_data_pair in ranges_data_list:
+                            if isinstance(r_data_pair, list) and len(r_data_pair) == 2:
+                                lower = np.array(r_data_pair[0], dtype=np.uint8)
+                                upper = np.array(r_data_pair[1], dtype=np.uint8)
+                                if lower.shape == (3,) and upper.shape == (3,):
+                                    parsed_ranges[color].append((lower, upper))
+                                else: print(f"Warning: Invalid shape for range in color '{color}' in {filename}.")
+                            else: print(f"Warning: Invalid range pair format for color '{color}' in {filename}.")
+                    else: print(f"Warning: Invalid data structure for color '{color}' in {filename}.")
+                return parsed_ranges if parsed_ranges else None
+            except json.JSONDecodeError as e: print(f"Error decoding JSON from {filename}: {e}")
+            except Exception as e: print(f"Error loading/parsing color ranges from {filename}: {type(e).__name__} - {e}")
         return None
-    
-    def save_color_ranges(self, filename="color_ranges.json"):
-        """Save color ranges to a JSON file."""
-        serializable_ranges = {
-            color: (lower.tolist(), upper.tolist()) 
-            for color, (lower, upper) in self.color_ranges.items()
-        }
-        with open(filename, 'w') as f:
-            json.dump(serializable_ranges, f, indent=4)
-    
-    def process_frame(self, frame_data: bytes) -> Dict[str, Any]:
-        """Process incoming frame data and return game state."""
+
+    def _save_color_ranges_to_file(self, filename: str = "color_ranges.json"):
+        serializable_ranges = {}
+        for color, ranges_list_tuples in self.color_ranges.items():
+            serializable_ranges[color] = [] 
+            for lower_np, upper_np in ranges_list_tuples:
+                 serializable_ranges[color].append((lower_np.tolist(), upper_np.tolist()))
         try:
-            # Decode frame
-            nparr = np.frombuffer(frame_data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if frame is None:
-                raise ValueError("Failed to decode frame")
-            
-            # Resize frame
-            frame = cv2.resize(frame, self.WINDOW_SIZE, interpolation=cv2.INTER_AREA)
-            processed_frame = frame.copy()
-            
-            # Process frame based on current mode
-            if self.mode == "calibrating":
-                processed_frame = self.process_calibration_frame(frame, processed_frame)
-            elif self.mode == "scanning":
-                processed_frame = self.process_scanning_frame(frame, processed_frame)
-            elif self.mode in ["solving", "scrambling"]:
-                processed_frame = self.process_solving_frame(frame, processed_frame)
-            else:  # idle or error mode
-                processed_frame = self.process_idle_frame(frame, processed_frame)
-            
-            # Store last processed frame
-            self.last_processed_frame = processed_frame.copy()
-            
-            # Encode processed frame
-            _, buffer = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-            frame_b64 = base64.b64encode(buffer).decode('utf-8')
-            
-            # Return current state
-            return {
-                "mode": self.mode,
-                "status_message": self.status_message,
-                "calibration_step": self.calibration_step if self.mode == "calibrating" else None,
-                "current_color": self.COLOR_NAMES[self.calibration_step] if self.mode == "calibrating" and self.calibration_step < len(self.COLOR_NAMES) else None,
-                "scan_index": self.current_scan_idx if self.mode == "scanning" else None,
-                "solve_move_index": self.current_solve_move_index if self.mode in ["solving", "scrambling"] else 0,
-                "total_solve_moves": self.total_solve_moves if self.mode in ["solving", "scrambling"] else 0,
-                "solution": self.solution if self.solution else None,
-                "error_message": self.error_message if self.mode == "error" else None,
-                "serial_connected": self.serial_connection is not None and self.serial_connection.is_open,
-                "processed_frame": frame_b64
-            }
-            
-        except Exception as e:
-            self.error_message = f"Frame processing error: {str(e)}"
-            return {
-                "mode": "error",
-                "error_message": self.error_message,
-                "status_message": "Error processing frame"
-            }
-    
-    def process_calibration_frame(self, frame, display_frame):
-        """Process frame during calibration mode."""
-        # Draw calibration grid
-        grid_size = int(min(self.WINDOW_SIZE) * 0.4)
-        grid_cell_size = grid_size // 3
-        pad_x, pad_y = 20, 50
-        
-        # Draw a small box around the center cell (1,1)
-        center_y_start = pad_y + grid_cell_size
-        center_y_end = pad_y + 2 * grid_cell_size
-        center_x_start = pad_x + grid_cell_size
-        center_x_end = pad_x + 2 * grid_cell_size
-        
-        # Draw the center cell box in green
-        cv2.rectangle(display_frame, 
-                     (center_x_start, center_y_start), 
-                     (center_x_end, center_y_end), 
-                     (0, 255, 0), 2)
-        
-        # Add instruction text
-        current_color = self.COLOR_NAMES[self.calibration_step]
-        instruction = f"Show {current_color} center, then click Capture"
-        cv2.putText(display_frame, instruction, 
-                   (pad_x, pad_y - 10), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        # Store grid position for calibration
-        self.last_valid_grid = (pad_x, pad_y, grid_size)
-        
+            with open(filename, 'w') as f:
+                json.dump(serializable_ranges, f, indent=4)
+            print(f"Color ranges saved to {filename}")
+        except Exception as e: print(f"Error saving color ranges to {filename}: {e}")
+
+    def _draw_calibration_overlay(self, display_frame: np.ndarray) -> np.ndarray:
+        height, width = display_frame.shape[:2]
+        roi_dimension = int(min(width, height) * self.calibration_roi_scale)
+        roi_dimension = max(20, roi_dimension) 
+        roi_x_start = (width - roi_dimension) // 2
+        roi_y_start = (height - roi_dimension) // 2
+        roi_x_end = roi_x_start + roi_dimension
+        roi_y_end = roi_y_start + roi_dimension
+        self.last_valid_grid_info_for_calibration = (roi_x_start, roi_y_start, roi_x_end, roi_y_end)
+        cv2.rectangle(display_frame, (roi_x_start, roi_y_start), (roi_x_end, roi_y_end), (0, 255, 0), 2)
+        center_x, center_y = roi_x_start + roi_dimension // 2, roi_y_start + roi_dimension // 2
+        cv2.line(display_frame, (center_x - 5, center_y), (center_x + 5, center_y), (0, 255, 0), 1)
+        cv2.line(display_frame, (center_x, center_y - 5), (center_x, center_y + 5), (0, 255, 0), 1)
+        if self.calibration_step < len(self.COLOR_NAMES_CALIBRATION):
+            current_color = self.COLOR_NAMES_CALIBRATION[self.calibration_step]
+            instruction = f"Aim {current_color} at green box. Press Capture."
+            cv2.putText(display_frame, instruction, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+        else: cv2.putText(display_frame, "Calibration Complete!", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         return display_frame
-    
-    def process_scanning_frame(self, frame, display_frame):
-        """Process frame during scanning mode."""
-        # Create a clean copy for display
-        display_frame = frame.copy()
+
+    def _process_scanning_step(self, display_frame_overlay: np.ndarray) -> np.ndarray:
+        frame_to_detect_on = self.current_frame_for_detection 
+        if frame_to_detect_on is None:
+             cv2.putText(display_frame_overlay, "Err: No detection frame", (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255),1)
+             return display_frame_overlay
+
+        best_contour_approx = self._find_best_cube_contour(frame_to_detect_on)
+        cube_detected = best_contour_approx is not None
+        status_color = (220, 220, 220) 
+
+        if cube_detected:
+            cv2.drawContours(display_frame_overlay, [best_contour_approx], -1, (0, 255, 0), 1)
+            x_c, y_c, w_c, h_c = cv2.boundingRect(best_contour_approx)
+            if w_c > 0 and h_c > 0:
+                cell_w, cell_h = w_c // 3, h_c // 3
+                for i in range(1, 3):
+                    cv2.line(display_frame_overlay, (x_c, y_c + i * cell_h), (x_c + w_c, y_c + i * cell_h), (0,80,0),1)
+                    cv2.line(display_frame_overlay, (x_c + i * cell_w, y_c), (x_c + i * cell_w, y_c + h_c), (0,80,0),1)
+            if self.prev_contour_scan is not None:
+                try: 
+                    M_curr = cv2.moments(best_contour_approx); M_prev = cv2.moments(self.prev_contour_scan)
+                    if M_curr["m00"] > 0 and M_prev["m00"] > 0:
+                        c_curr = (int(M_curr["m10"]/M_curr["m00"]), int(M_curr["m01"]/M_curr["m00"]))
+                        c_prev = (int(M_prev["m10"]/M_prev["m00"]), int(M_prev["m01"]/M_prev["m00"]))
+                        pos_diff = np.sqrt((c_curr[0]-c_prev[0])**2 + (c_curr[1]-c_prev[1])**2)
+                        if pos_diff < 10 : self.stability_counter += 1
+                        else: self.stability_counter = 0
+                    else: self.stability_counter = 0
+                except: self.stability_counter = 0 
+            else: self.stability_counter = 1 
+            self.prev_contour_scan = best_contour_approx.copy() if best_contour_approx is not None else None
+        else: 
+            self.stability_counter = 0
+            self.prev_contour_scan = None
+
+        current_time = time.time()
+        time_since_last_scan_attempt = current_time - self.last_scan_time
+        time_since_motor = current_time - self.last_motor_move_time
         
-        # Downsample frame for faster processing
-        small_frame = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2))
+        scan_status_text = f"Scan {self.current_scan_idx + 1}/12: "
+        ready_to_capture_this_frame = False
+
+        if not cube_detected: scan_status_text += "Detecting..."
+        elif time_since_motor < self.MOTOR_STABILIZATION_TIME:
+            scan_status_text += f"Motor ({self.MOTOR_STABILIZATION_TIME - time_since_motor:.1f}s)"
+        elif time_since_last_scan_attempt < self.SCAN_COOLDOWN:
+            scan_status_text += f"Cooldown ({self.SCAN_COOLDOWN - time_since_last_scan_attempt:.1f}s)"
+        elif self.stability_counter < self.STABILITY_THRESHOLD:
+            scan_status_text += f"Stabilizing ({self.stability_counter}/{self.STABILITY_THRESHOLD})"
+        else: 
+            scan_status_text += "CAPTURING..."
+            ready_to_capture_this_frame = True
+            status_color = (0,255,0) 
         
-        # Smooth the frame to reduce noise (use smaller kernel for speed)
-        small_frame = cv2.GaussianBlur(small_frame, (3, 3), 0)
-        
-        # Color detection and cube processing code
-        hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
-        combined_mask = np.zeros((small_frame.shape[0], small_frame.shape[1]), dtype=np.uint8)
-        
-        # Create mask for all colors more efficiently
-        for color, ranges in self.color_ranges.items():
-            if isinstance(ranges, list):  # Handle multiple ranges (for red)
-                for lower, upper in ranges:
-                    mask = cv2.inRange(hsv, lower, upper)
-                    combined_mask = cv2.bitwise_or(combined_mask, mask)
-            else:  # Single range for other colors
-                lower, upper = ranges
-                mask = cv2.inRange(hsv, lower, upper)
-                combined_mask = cv2.bitwise_or(combined_mask, mask)
-        
-        # Scale mask back to original size
-        combined_mask = cv2.resize(combined_mask, (frame.shape[1], frame.shape[0]))
-        
-        # Clean up mask (use smaller kernel and fewer iterations)
-        kernel = np.ones((3,3), np.uint8)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-        
-        # Find contours with less detail for better stability
-        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        cube_detected = False
-        best_contour = None
-        best_score = float('inf')
-        current_grid = self.last_valid_grid  # Keep previous grid if no new detection
-        
-        # Process only the largest contours
-        for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:3]:
-            area = cv2.contourArea(contour)
-            if self.MIN_CONTOUR_AREA < area < self.MAX_CONTOUR_AREA:
-                peri = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+        cv2.putText(display_frame_overlay, scan_status_text, (10,25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1)
+        self.status_message = scan_status_text 
+
+        if ready_to_capture_this_frame and self.current_scan_idx < 12:
+            if best_contour_approx is None:
+                self.status_message = scan_status_text.replace("CAPTURING...", "Contour Lost before warp")
+                return display_frame_overlay
+
+            warped_face = self._perspective_transform(frame_to_detect_on, best_contour_approx)
+            if warped_face is not None and warped_face.size > 0:
+                grid_s = min(warped_face.shape[0], warped_face.shape[1])
+                cell_s = max(1, grid_s // 3)
+                if grid_s < 21 or cell_s < 7: 
+                    self.status_message = scan_status_text.replace("CAPTURING...", "Warped too small")
+                    return display_frame_overlay 
                 
-                if len(approx) >= 4:
-                    x, y, w, h = cv2.boundingRect(approx)
-                    aspect_ratio = float(w) / h
-                    squareness_score = abs(1 - aspect_ratio)
-                    
-                    if 0.7 < aspect_ratio < 1.3 and squareness_score < best_score:
-                        best_score = squareness_score
-                        best_contour = contour
-                        cube_detected = True
+                current_face_sticker_colors = []
+                valid_rois = True
+                for r_idx in range(3): 
+                    for c_idx in range(3): 
+                        y_s, y_e = r_idx * cell_s, (r_idx + 1) * cell_s
+                        x_s, x_e = c_idx * cell_s, (c_idx + 1) * cell_s
+                        pad = max(1, cell_s // 6) 
                         
-                        # Smooth the grid position using previous position if available
-                        grid_size = min(w, h)
-                        center_x = x + w // 2
-                        center_y = y + h // 2
-                        pad_x = center_x - grid_size // 2
-                        pad_y = center_y - grid_size // 2
+                        roi_y_s = min(y_s + pad, warped_face.shape[0] - 1)
+                        roi_y_e = max(roi_y_s + 1, min(y_e - pad, warped_face.shape[0])) 
+                        roi_x_s = min(x_s + pad, warped_face.shape[1] - 1)
+                        roi_x_e = max(roi_x_s + 1, min(x_e - pad, warped_face.shape[1])) 
+
+                        if roi_y_e <= roi_y_s or roi_x_e <= roi_x_s: current_face_sticker_colors.append('X'); valid_rois=False; break
+                        sticker_roi = warped_face[roi_y_s:roi_y_e, roi_x_s:roi_x_e]
+                        if sticker_roi.size==0: current_face_sticker_colors.append('X'); valid_rois=False; break
                         
-                        if self.last_valid_grid:
-                            prev_x, prev_y, prev_size = self.last_valid_grid
-                            # Smooth the transition
-                            pad_x = int(0.7 * prev_x + 0.3 * pad_x)
-                            pad_y = int(0.7 * prev_y + 0.3 * pad_y)
-                            grid_size = int(0.7 * prev_size + 0.3 * grid_size)
-                        
-                        current_grid = (pad_x, pad_y, grid_size)
-                        break
-        
-        if cube_detected and best_contour is not None:
-            self.last_valid_grid = current_grid
-            pad_x, pad_y, grid_size = current_grid
-            
-            # Draw contour and grid with anti-aliasing for smoother appearance
-            cv2.drawContours(display_frame, [best_contour], -1, (0, 255, 0), 2, cv2.LINE_AA)
-            
-            grid_cell_size = grid_size // 3
-            
-            # Draw grid with anti-aliasing
-            for i in range(1, 3):
-                cv2.line(display_frame, 
-                        (pad_x + i * grid_cell_size, pad_y), 
-                        (pad_x + i * grid_cell_size, pad_y + grid_size), 
-                        (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.line(display_frame, 
-                        (pad_x, pad_y + i * grid_cell_size), 
-                        (pad_x + grid_size, pad_y + i * grid_cell_size), 
-                        (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.rectangle(display_frame, 
-                        (pad_x, pad_y), 
-                        (pad_x + grid_size, pad_y + grid_size), 
-                        (0, 255, 0), 2, cv2.LINE_AA)
-            
-            # Check stability based on contour shape and position
-            if hasattr(self, 'prev_contour') and self.prev_contour is not None:
-                shape_diff = cv2.matchShapes(best_contour, self.prev_contour, 1, 0.0)
-                position_diff = abs(pad_x - self.prev_x) + abs(pad_y - self.prev_y)
+                        detected_color = self._detect_color(sticker_roi)
+                        current_face_sticker_colors.append(detected_color)
+                    if not valid_rois: break
                 
-                if shape_diff < 0.3 and position_diff < 20:
-                    # Only increment if below threshold
-                    if self.stability_counter < self.STABILITY_THRESHOLD:
-                        self.stability_counter += 1
-                else:
-                    self.stability_counter = max(0, self.stability_counter - 1)  # Gradual decrease
-            
-            self.prev_contour = best_contour
-            self.prev_x, self.prev_y = pad_x, pad_y
-            
-            # Get face colors and check for auto-scanning
-            current_time = time.time()
-            time_since_last_scan = current_time - self.last_scan_time
-            
-            if (self.stability_counter >= self.STABILITY_THRESHOLD and 
-                time_since_last_scan >= self.SCAN_COOLDOWN):
+                non_center_unknown = False
+                if len(current_face_sticker_colors) == 9:
+                    for i, color_char in enumerate(current_face_sticker_colors):
+                        if i == 4: continue 
+                        if color_char == 'X':
+                            non_center_unknown = True
+                            break
                 
-                face_colors = []
-                for i in range(3):
-                    for j in range(3):
-                        y_start = pad_y + i * grid_cell_size
-                        y_end = pad_y + (i + 1) * grid_cell_size
-                        x_start = pad_x + j * grid_cell_size
-                        x_end = pad_x + (j + 1) * grid_cell_size
+                if valid_rois and len(current_face_sticker_colors) == 9:
+                    if non_center_unknown: 
+                        self.status_message = scan_status_text.replace("CAPTURING...", f"Unk.clr(edge/corn): {''.join(current_face_sticker_colors)}")
+                    elif self.prev_face_colors_scan is None or tuple(current_face_sticker_colors) != tuple(self.prev_face_colors_scan):
+                        self.u_scans[self.current_scan_idx] = list(current_face_sticker_colors)
+                        self.prev_face_colors_scan = list(current_face_sticker_colors)
+                        print(f"Scan {self.current_scan_idx + 1} OK: {''.join(current_face_sticker_colors)}")
                         
-                        padding = grid_cell_size // 8
-                        y_start += padding
-                        y_end -= padding
-                        x_start += padding
-                        x_end -= padding
-                        
-                        roi = frame[y_start:y_end, x_start:x_end]
-                        color = self.detect_color(roi)
-                        if color:
-                            face_colors.append(color)
-                            # Draw detected color with anti-aliasing
-                            cv2.putText(display_frame, 
-                                      color, 
-                                      (x_start + grid_cell_size//4, y_start + grid_cell_size//2),
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2, cv2.LINE_AA)
-                
-                if len(face_colors) == 9:
-                    if not hasattr(self, 'prev_face_colors'):
-                        self.prev_face_colors = face_colors
-                        self.stability_counter = 1
-                    elif face_colors == self.prev_face_colors:
-                        self.u_scans[self.current_scan_idx] = face_colors
                         self.current_scan_idx += 1
-                        self.last_scan_time = current_time
-                        self.stability_counter = 0
-                        self.prev_face_colors = None
-                        
-                        # Send rotation command if not last scan
-                        if self.current_scan_idx < len(self.rotation_sequence):
-                            move = self.rotation_sequence[self.current_scan_idx]
-                            if move:
-                                self.send_arduino_command(move)
-                        
-                        # Check if all scans complete
-                        if self.current_scan_idx >= 12:
-                            # All scans complete, send final B F' and process solution
-                            print("\nAll scans completed! Processing solution...")
-                            print("\nSending final B F' command...")
-                            if not self.send_arduino_command("B F'"):
-                                self.mode = "error"
-                                self.error_message = "Failed to execute final B F' command"
-                                return False
+                        self.stability_counter = 0 
+                        self.last_scan_time = time.time() 
+
+                        if self.current_scan_idx < 12:
+                            next_rotation_cmd = self.rotation_sequence[self.current_scan_idx] 
+                            if next_rotation_cmd:
+                                self.status_message = f"Scan {self.current_scan_idx} done. Rotating..."
+                                self._send_compound_move(next_rotation_cmd) 
+                        else: 
+                            self.status_message = "All scans done. Finalizing..."
+                            self._send_compound_move("B F'") # Final rotation to a known state if needed
                             
-                            print("Waiting for motors to stabilize...")
-                            time.sleep(self.MOTOR_STABILIZATION_TIME)
-                            
-                            # Construct cube state and solve
-                            cube_state = self.construct_cube_state()
-                            if cube_state:
-                                solution = self.solve_cube(cube_state)
-                                if solution:
-                                    self.solution = solution
+                            constructed_state = self._construct_cube_state_from_scans()
+                            if constructed_state:
+                                # self._print_cube_state_visual(constructed_state, "Constructed (FRBLUD)") # Optional debug
+                                solution_str = self._solve_cube_with_kociemba(constructed_state)
+                                if solution_str is not None: 
+                                    self.solution = solution_str 
                                     self.mode = "solving"
-                                    self.current_solve_move_index = 0
-                                    self.total_solve_moves = len(solution.split())
-                                    self.status_message = "Solution found, executing moves"
-                                    print(f"\nSending solution command: SOLUTION:{solution}")
-                                    self.send_arduino_command(solution)
-                                else:
-                                    self.mode = "error"
-                                    self.error_message = "Could not find solution"
-                            else:
-                                self.mode = "error"
-                                self.error_message = "Invalid cube state"
-                    else:
-                        self.prev_face_colors = face_colors
-                        self.stability_counter = 1
+                                    self.total_solve_moves = len(self.solution.split()) if self.solution else 0
+                                    self.current_solve_move_index = 0 
+                                    self.status_message = f"Solution ({self.total_solve_moves}m). Sending..."
+                                    self.send_arduino_command(f"SOLUTION:{self.solution}", is_solution=True)
+                                else: 
+                                    self.mode = "idle" 
+                                    self.error_message = "Could not solve. Check scans/colors or cube state."
+                                    self.status_message = self.error_message
+                                    self._reset_scan_state() 
+                            else: 
+                                self.mode = "idle" 
+                                self.error_message = "Cube construction failed. Scan may be invalid."
+                                self.status_message = self.error_message
+                                self._reset_scan_state()
+                    else: self.status_message = scan_status_text.replace("CAPTURING...", "Duplicate")
+                elif not valid_rois: self.status_message = scan_status_text.replace("CAPTURING...","Invalid ROIs")
+                else: self.status_message = scan_status_text.replace("CAPTURING...","Sticker count err")
+            else: self.status_message = scan_status_text.replace("CAPTURING...","Warp failed")
+        return display_frame_overlay
+
+    def _draw_solving_overlay(self, display_frame: np.ndarray) -> np.ndarray:
+        mode_text = self.mode.capitalize()
+        progress_text = f"{mode_text}: "
+        if self.total_solve_moves > 0 :
+            progress_text += f"{self.current_solve_move_index}/{self.total_solve_moves}"
+        else: progress_text += "Starting..."
+        
+        if self.mode == "solving" and self.solution:
+            preview = self.solution[:25] + ('...' if len(self.solution)>25 else '')
+            cv2.putText(display_frame, f"Sol: {preview}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200,200,0), 1)
+
+        cv2.putText(display_frame, progress_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220,220,50), 1)
+        return display_frame
+
+    def _detect_color(self, roi_img: np.ndarray) -> str:
+        if roi_img is None or roi_img.size == 0 or roi_img.shape[0] < 5 or roi_img.shape[1] < 5: 
+            return 'X' 
+
+        median_ksize = 3 
+        if min(roi_img.shape[:2]) <= median_ksize: 
+            processed_roi = roi_img
         else:
-            self.stability_counter = max(0, self.stability_counter - 1)  # Gradual decrease
-            self.prev_contour = None
+            processed_roi = cv2.medianBlur(roi_img, median_ksize)
+
+        hsv_roi = cv2.cvtColor(processed_roi, cv2.COLOR_BGR2HSV)
+
+        h, w = hsv_roi.shape[:2]
+        ch_s, ch_e = max(0, int(h*0.25)), min(h, int(h*0.75)) if h > 4 else h 
+        cw_s, cw_e = max(0, int(w*0.25)), min(w, int(w*0.75)) if w > 4 else w
         
-        # Add scan progress and stability text with anti-aliasing
-        if self.current_scan_idx < 12:
-            if cube_detected:
-                status = f"Scan {self.current_scan_idx + 1}/12 - Stability: {min(self.stability_counter, self.STABILITY_THRESHOLD)}/{self.STABILITY_THRESHOLD}"
-            else:
-                status = f"Position cube for scan {self.current_scan_idx + 1}/12"
-            cv2.putText(display_frame, status, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        if ch_e <= ch_s or cw_e <= cw_s : 
+            hsv_sample_area = hsv_roi 
+            if hsv_sample_area.size == 0: return 'X'
+        else: 
+            hsv_sample_area = hsv_roi[ch_s:ch_e, cw_s:cw_e]
         
-        return display_frame
-    
-    def process_solving_frame(self, frame, display_frame):
-        """Process frame during solving/scrambling mode."""
-        # Draw progress text
-        mode_text = "Solving" if self.mode == "solving" else "Scrambling"
-        progress_text = f"{mode_text} ({self.current_solve_move_index}/{self.total_solve_moves})"
-        cv2.putText(display_frame, progress_text, 
-                   (11, self.WINDOW_SIZE[1] - 19), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-        cv2.putText(display_frame, progress_text, 
-                   (10, self.WINDOW_SIZE[1] - 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
-        
-        return display_frame
-    
-    def process_idle_frame(self, frame, display_frame):
-        """Process frame during idle mode."""
-        # Draw cube detection overlay
-        if self.last_valid_grid:
-            pad_x, pad_y, grid_size = self.last_valid_grid
-            cv2.rectangle(display_frame, 
-                         (pad_x, pad_y), 
-                         (pad_x + grid_size, pad_y + grid_size), 
-                         (0, 255, 0), 2)
+        if hsv_sample_area.size == 0: return 'X'
+
+        best_match_color = 'X'; highest_match_strength = -1.0
+
+        for color_name, hsv_ranges_list in self.color_ranges.items():
+            current_color_pixel_count = 0
+            for lower_hsv, upper_hsv in hsv_ranges_list:
+                if not (isinstance(lower_hsv, np.ndarray) and isinstance(upper_hsv, np.ndarray) and
+                        lower_hsv.shape == (3,) and upper_hsv.shape == (3,)):
+                    continue
+
+                mask = cv2.inRange(hsv_sample_area, lower_hsv, upper_hsv)
+                current_color_pixel_count += cv2.countNonZero(mask)
             
-            grid_cell_size = grid_size // 3
-            for i in range(1, 3):
-                cv2.line(display_frame, 
-                        (pad_x + i * grid_cell_size, pad_y), 
-                        (pad_x + i * grid_cell_size, pad_y + grid_size), 
-                        (0, 255, 0), 1)
-                cv2.line(display_frame, 
-                        (pad_x, pad_y + i * grid_cell_size), 
-                        (pad_x + grid_size, pad_y + i * grid_cell_size), 
-                        (0, 255, 0), 1)
+            total_pixels_in_sample = hsv_sample_area.shape[0] * hsv_sample_area.shape[1]
+            if total_pixels_in_sample == 0: continue 
+            match_percentage = current_color_pixel_count / total_pixels_in_sample
+
+            if match_percentage > highest_match_strength:
+                highest_match_strength = match_percentage
+                best_match_color = color_name
         
-        return display_frame
-    
-    def detect_cube(self, frame):
-        """Detect the Rubik's cube in the frame and update last_valid_grid."""
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        combined_mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
-        
-        # Create mask for all colors
-        for color, (lower, upper) in self.color_ranges.items():
-            combined_mask |= cv2.inRange(hsv, lower, upper)
-        
-        # Clean up mask
-        kernel = np.ones((5,5), np.uint8)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-        
-        # Find contours
-        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        best_contour = None
-        best_score = float('inf')
-        cube_detected = False
-        best_pos = None
-        
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if self.MIN_CONTOUR_AREA < area < self.MAX_CONTOUR_AREA:
-                peri = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-                
-                if len(approx) >= 4:
-                    x, y, w, h = cv2.boundingRect(approx)
-                    aspect_ratio = float(w) / h
-                    squareness_score = abs(1 - aspect_ratio)
-                    
-                    if 0.7 < aspect_ratio < 1.3 and squareness_score < best_score:
-                        best_score = squareness_score
-                        best_contour = contour
-                        best_pos = (x, y, w, h)
-                        cube_detected = True
-        
-        if cube_detected and best_pos:
-            x, y, w, h = best_pos
-            grid_size = min(w, h)
-            self.last_valid_grid = (x, y, grid_size)
-            return True
-        
-        return False
-    
-    def detect_color(self, roi):
-        """
-        Detect the dominant color in a region of interest (ROI) using multiple methods.
-        Returns the first letter of the color (e.g., 'R' for Red).
-        """
-        if len(roi.shape) == 3 and roi.shape[2] == 3:
-            if roi.dtype != np.uint8:
-                roi = np.uint8(roi)
+        if highest_match_strength < 0.20: 
+            return 'X'
             
-            h, w = roi.shape[:2]
-            center_roi = roi[h//4:3*h//4, w//4:3*w//4]
-            hsv_roi = cv2.cvtColor(center_roi, cv2.COLOR_BGR2HSV)
-            
-            # Method 1: Range-based detection
-            color_matches = {}
-            for color, ranges in self.color_ranges.items():
-                if isinstance(ranges, list):  # Handle multiple ranges (for red)
-                    match_percentage = 0
-                    for lower, upper in ranges:
-                        mask = cv2.inRange(hsv_roi, lower, upper)
-                        match_percentage += cv2.countNonZero(mask)
-                    match_percentage = match_percentage / (center_roi.shape[0] * center_roi.shape[1])
-                else:
-                    lower, upper = ranges
-                    mask = cv2.inRange(hsv_roi, lower, upper)
-                    match_percentage = cv2.countNonZero(mask) / (center_roi.shape[0] * center_roi.shape[1])
-                color_matches[color] = match_percentage * 100
-            
-            range_best_color = max(color_matches, key=color_matches.get)
-            range_best_match = color_matches[range_best_color]
-            
-            # Method 2: Most common HSV value
-            pixels = hsv_roi.reshape((-1, 3))
-            pixel_list = [tuple(p) for p in pixels]
-            from collections import Counter
-            most_common_hsv = Counter(pixel_list).most_common(1)[0][0]
-            
-            # Find closest color center using weighted distances
-            dominant_color = None
-            min_distance = float('inf')
-            
-            for color, ranges in self.color_ranges.items():
-                if isinstance(ranges, list):
-                    # For red, use the closest range
-                    min_range_dist = float('inf')
-                    for lower, upper in ranges:
-                        middle_hsv = (lower + upper) / 2
-                        h_dist = min(abs(most_common_hsv[0] - middle_hsv[0]), 
-                                   180 - abs(most_common_hsv[0] - middle_hsv[0]))
-                        s_dist = abs(most_common_hsv[1] - middle_hsv[1])
-                        v_dist = abs(most_common_hsv[2] - middle_hsv[2])
-                        
-                        if color == "W":
-                            distance = 0.1 * h_dist + 0.3 * s_dist + 0.6 * v_dist
-                        else:
-                            distance = 0.6 * h_dist + 0.3 * s_dist + 0.1 * v_dist
-                        
-                        min_range_dist = min(min_range_dist, distance)
-                    
-                    if min_range_dist < min_distance:
-                        min_distance = min_range_dist
-                        dominant_color = color
-                else:
-                    lower, upper = ranges
-                    middle_hsv = (lower + upper) / 2
-                    h_dist = min(abs(most_common_hsv[0] - middle_hsv[0]), 
-                               180 - abs(most_common_hsv[0] - middle_hsv[0]))
-                    s_dist = abs(most_common_hsv[1] - middle_hsv[1])
-                    v_dist = abs(most_common_hsv[2] - middle_hsv[2])
-                    
-                    if color == "W":
-                        distance = 0.1 * h_dist + 0.3 * s_dist + 0.6 * v_dist
-                    else:
-                        distance = 0.6 * h_dist + 0.3 * s_dist + 0.1 * v_dist
-                    
-                    if distance < min_distance:
-                        min_distance = distance
-                        dominant_color = color
-            
-            # Decision making based on all methods
-            if range_best_match > 15:  # Strong match with range-based method
-                return range_best_color
-            elif dominant_color:  # Use dominant color if range-based method isn't confident
-                return dominant_color
-            
-            # Method 3: Average HSV (fallback)
-            avg_hsv = np.mean(hsv_roi, axis=(0,1))
-            closest_color = None
-            min_distance = float('inf')
-            
-            for color, ranges in self.color_ranges.items():
-                if isinstance(ranges, list):
-                    # For red, use the closest range
-                    min_range_dist = float('inf')
-                    for lower, upper in ranges:
-                        middle_hsv = (lower + upper) / 2
-                        h_dist = min(abs(avg_hsv[0] - middle_hsv[0]), 
-                                   180 - abs(avg_hsv[0] - middle_hsv[0]))
-                        s_dist = abs(avg_hsv[1] - middle_hsv[1])
-                        v_dist = abs(avg_hsv[2] - middle_hsv[2])
-                        
-                        if color == "W":
-                            distance = 0.1 * h_dist + 0.3 * s_dist + 0.6 * v_dist
-                        else:
-                            distance = 0.6 * h_dist + 0.3 * s_dist + 0.1 * v_dist
-                        
-                        min_range_dist = min(min_range_dist, distance)
-                    
-                    if min_range_dist < min_distance:
-                        min_distance = min_range_dist
-                        closest_color = color
-                else:
-                    lower, upper = ranges
-                    middle_hsv = (lower + upper) / 2
-                    h_dist = min(abs(avg_hsv[0] - middle_hsv[0]), 
-                               180 - abs(avg_hsv[0] - middle_hsv[0]))
-                    s_dist = abs(avg_hsv[1] - middle_hsv[1])
-                    v_dist = abs(avg_hsv[2] - middle_hsv[2])
-                    
-                    if color == "W":
-                        distance = 0.1 * h_dist + 0.3 * s_dist + 0.6 * v_dist
-                    else:
-                        distance = 0.6 * h_dist + 0.3 * s_dist + 0.1 * v_dist
-                    
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_color = color
-            
-            return closest_color
-        
-        return None
-    
-    def cleanup(self):
-        """Clean up resources."""
-        if self.serial_connection and self.serial_connection.is_open:
-            try:
-                self.serial_connection.write("STOP\n".encode('ascii'))
-                self.serial_connection.flush()
-                time.sleep(0.1)
-                self.serial_connection.close()
-            except:
-                pass 
-    
-    def calibrate_color(self) -> bool:
-        """Capture and calibrate the current color."""
-        if self.mode != "calibrating" or self.calibration_step >= len(self.COLOR_NAMES):
-            return False
-        
-        if not self.last_valid_grid or not self.last_processed_frame is not None:
-            return False
-        
+        return best_match_color
+
+    def capture_calibration_color(self) -> bool:
+        if self.mode != "calibrating" or self.calibration_step >= len(self.COLOR_NAMES_CALIBRATION):
+            self.error_message = "Not in calibration mode or calibration already complete."
+            self.status_message = self.error_message; return False
+        if self.last_processed_frame_for_calibration is None: 
+            self.error_message = "No raw frame available for calibration capture."
+            self.status_message = self.error_message; return False
+        if self.last_valid_grid_info_for_calibration is None:
+            self.error_message = "Calibration ROI not set (internal error)."
+            self.status_message = self.error_message; return False
+
         try:
-            pad_x, pad_y, grid_size = self.last_valid_grid
-            grid_cell_size = grid_size // 3
+            # Resize the stored *original raw frame* to WINDOW_SIZE for consistent ROI application
+            resized_frame_for_cal_roi = cv2.resize(self.last_processed_frame_for_calibration, 
+                                                   self.WINDOW_SIZE, interpolation=cv2.INTER_AREA)
             
-            # Get ROI from center cell (1,1)
-            center_y_start = pad_y + grid_cell_size
-            center_y_end = pad_y + 2 * grid_cell_size
-            center_x_start = pad_x + grid_cell_size
-            center_x_end = pad_x + 2 * grid_cell_size
+            x_s, y_s, x_e, y_e = self.last_valid_grid_info_for_calibration 
+            # Ensure ROI coordinates are within the bounds of resized_frame_for_cal_roi
+            h_cal, w_cal = resized_frame_for_cal_roi.shape[:2]
+            x_s = np.clip(x_s, 0, w_cal -1)
+            y_s = np.clip(y_s, 0, h_cal -1)
+            x_e = np.clip(x_e, x_s + 1, w_cal)
+            y_e = np.clip(y_e, y_s + 1, h_cal)
+
+            if y_e <= y_s or x_e <= x_s:
+                 self.error_message = "Calibration ROI became invalid after clipping."
+                 self.status_message = self.error_message; return False
+
+            roi_to_calibrate = resized_frame_for_cal_roi[y_s:y_e, x_s:x_e]
+
+            if roi_to_calibrate.size == 0:
+                self.error_message = "Calibration ROI is empty after extraction."
+                self.status_message = self.error_message; return False
             
-            roi = self.last_processed_frame[center_y_start:center_y_end, 
-                                         center_x_start:center_x_end]
+            roi_filtered = cv2.bilateralFilter(roi_to_calibrate, d=5, sigmaColor=30, sigmaSpace=30)
+            hsv_roi = cv2.cvtColor(roi_filtered, cv2.COLOR_BGR2HSV)
+
+            h_roi, w_roi = hsv_roi.shape[:2]
+            center_crop_h_start, center_crop_h_end = max(0, int(h_roi*0.25)), min(h_roi, int(h_roi*0.75))
+            center_crop_w_start, center_crop_w_end = max(0, int(w_roi*0.25)), min(w_roi, int(w_roi*0.75))
             
-            if roi.size == 0:
-                return False
-            
-            # Calculate HSV ranges
-            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            avg_hsv = np.mean(hsv_roi, axis=(0, 1))
-            
-            current_color = self.COLOR_NAMES[self.calibration_step]
-            h_range = 10 if current_color != "W" else 90  # Wider hue range for white
-            s_range = 50
-            v_range = 50
-            
-            # Calculate lower and upper bounds
-            lower = np.array([
-                max(0, avg_hsv[0] - h_range),
-                max(0, avg_hsv[1] - s_range),
-                max(0, avg_hsv[2] - v_range)
-            ])
-            upper = np.array([
-                min(180, avg_hsv[0] + h_range),
-                min(255, avg_hsv[1] + s_range),
-                min(255, avg_hsv[2] + v_range)
-            ])
-            
-            # Special handling for white
-            if current_color == "W":
-                lower[1] = 0  # Allow low saturation for white
-                lower[2] = max(150, avg_hsv[2] - v_range)  # Must be bright
-            
-            self.color_ranges[current_color] = (lower, upper)
-            self.calibration_step += 1
-            
-            if self.calibration_step >= len(self.COLOR_NAMES):
-                self.save_color_ranges()
-                self.mode = "idle"
-                self.status_message = "Calibration completed"
+            if center_crop_h_end <= center_crop_h_start or center_crop_w_end <= center_crop_w_start:
+                hsv_sample_for_median = hsv_roi
             else:
-                self.status_message = f"Calibrated {current_color}. Now show {self.COLOR_NAMES[self.calibration_step]}"
+                hsv_sample_for_median = hsv_roi[center_crop_h_start:center_crop_h_end, center_crop_w_start:center_crop_w_end]
+
+            if hsv_sample_for_median.size == 0:
+                self.error_message = "Calibration sample area is empty."
+                self.status_message = self.error_message; return False
+
+            avg_h = int(np.median(hsv_sample_for_median[:,:,0])) 
+            avg_s = int(np.median(hsv_sample_for_median[:,:,1]))
+            avg_v = int(np.median(hsv_sample_for_median[:,:,2]))
+            print(f"Median HSV for calib ROI ({self.COLOR_NAMES_CALIBRATION[self.calibration_step]}): H={avg_h}, S={avg_s}, V={avg_v}")
+
+            current_color_to_cal = self.COLOR_NAMES_CALIBRATION[self.calibration_step]
             
+            h_delta = 10 
+            s_abs_delta = 55 
+            v_abs_delta = 65 
+
+            s_min_default = 50; v_min_default = 50
+
+            if current_color_to_cal == "W": 
+                h_delta = 30 
+                s_max_cap = 80 
+                v_min_cap = 140 
+                lower_s = max(0, avg_s - s_abs_delta); upper_s = min(s_max_cap, avg_s + s_abs_delta)
+                lower_v = max(v_min_cap, avg_v - v_abs_delta); upper_v = min(255, avg_v + v_abs_delta)
+            elif current_color_to_cal in ["R", "O"]:
+                 h_delta = 7 
+                 lower_s = max(s_min_default + 20, avg_s - s_abs_delta) 
+                 upper_s = min(255, avg_s + s_abs_delta)
+                 lower_v = max(v_min_default + 10, avg_v - v_abs_delta)
+                 upper_v = min(255, avg_v + v_abs_delta)
+            else: 
+                 lower_s = max(s_min_default, avg_s - s_abs_delta)
+                 upper_s = min(255, avg_s + s_abs_delta)
+                 lower_v = max(v_min_default, avg_v - v_abs_delta)
+                 upper_v = min(255, avg_v + v_abs_delta)
+
+            lower_s = np.clip(lower_s, 0, 255); upper_s = np.clip(upper_s, 0, 255)
+            lower_v = np.clip(lower_v, 0, 255); upper_v = np.clip(upper_v, 0, 255)
+            if lower_s > upper_s: lower_s = max(0, upper_s - 10) 
+            if lower_v > upper_v: lower_v = max(0, upper_v - 10)
+
+            final_ranges = []
+            if current_color_to_cal == "R": 
+                hue_low_threshold = h_delta + 5 
+                hue_high_threshold = 179 - (h_delta + 5)
+
+                if avg_h < hue_low_threshold: 
+                     final_ranges.append((np.array([0, lower_s, lower_v]), np.array([min(179, avg_h + h_delta), upper_s, upper_v])))
+                     final_ranges.append((np.array([max(0, 179 - h_delta), lower_s, lower_v]), np.array([179, upper_s, upper_v])))
+                elif avg_h > hue_high_threshold: 
+                     final_ranges.append((np.array([max(0, avg_h - h_delta), lower_s, lower_v]), np.array([179, upper_s, upper_v])))
+                     final_ranges.append((np.array([0, lower_s, lower_v]), np.array([min(179, h_delta), upper_s, upper_v])))
+                else: 
+                     final_ranges.append((np.array([max(0,avg_h-h_delta),lower_s,lower_v]), np.array([min(179,avg_h+h_delta),upper_s,upper_v])))
+                final_ranges = [(l,u) for l,u in final_ranges if np.all(l<=u) and l[0]<=u[0] and l[0] < 180 and u[0] < 180]
+            else: 
+                l_h = max(0, avg_h - h_delta)
+                u_h = min(179, avg_h + h_delta)
+                final_ranges.append((np.array([l_h, lower_s, lower_v]), np.array([u_h, upper_s, upper_v])))
+
+            if not final_ranges: 
+                print(f"! Warning: No valid ranges for {current_color_to_cal}. Using wide fallback.")
+                final_ranges.append((np.array([max(0,avg_h-15),max(0,avg_s-70),max(0,avg_v-80)]), 
+                                     np.array([min(179,avg_h+15),min(255,avg_s+70),min(255,avg_v+80)])))
+
+            self.color_ranges[current_color_to_cal] = final_ranges
+            print(f"Calibrated {current_color_to_cal}: {self.color_ranges[current_color_to_cal]}")
+
+            self.calibration_step += 1
+            if self.calibration_step >= len(self.COLOR_NAMES_CALIBRATION):
+                self._save_color_ranges_to_file()
+                self.mode = "idle"
+                self.status_message = "Calibration complete & saved."
+            else:
+                next_color = self.COLOR_NAMES_CALIBRATION[self.calibration_step]
+                self.status_message = f"Calibrated {current_color_to_cal}. Next: {next_color}"
+            self.error_message = None 
             return True
-            
+
         except Exception as e:
-            self.error_message = f"Calibration error: {str(e)}"
+            self.error_message = f"Calib. capture error: {type(e).__name__} - {e}"
+            self.status_message = "Calibration capture failed."
+            print(f"Error in capture_calibration_color: {self.error_message}")
             return False
-    
-    def start_scanning(self) -> bool:
-        """Start the scanning process."""
-        if self.mode not in ["idle", "error"]:
-            return False
-        
-        self.mode = "scanning"
+
+    def _reset_scan_state(self):
         self.current_scan_idx = 0
         self.u_scans = [[] for _ in range(12)]
-        self.status_message = "Position cube for first scan"
-        return True
-    
-    def capture_scan(self) -> bool:
-        """Capture the current face scan."""
-        if self.mode != "scanning" or self.current_scan_idx >= 12:
-            return False
-        
-        if not self.last_valid_grid or not self.last_processed_frame is not None:
-            return False
-        
+        self.prev_face_colors_scan = None
+        self.prev_contour_scan = None
+        self.stability_counter = 0
+        self.last_scan_time = time.time()
+        self.last_motor_move_time = time.time() 
+        print("Scan state has been reset.")
+
+    def _reset_solve_state(self):
+        self.solution = None
+        self.current_solve_move_index = 0
+        self.total_solve_moves = 0
+        print("Solve state has been reset.")
+
+    def _validate_kociemba_string(self, s: str, name: str = "Cube String"):
+        """Helper to validate Kociemba input string format."""
+        if not isinstance(s, str): raise ValueError(f"{name} must be a string.")
+        if len(s) != 54: raise ValueError(f"{name} must be 54 chars long, got {len(s)}: '{s[:10]}...'")
+        allowed_chars = {'U', 'R', 'F', 'D', 'L', 'B'}
+        if not all(c in allowed_chars for c in s):
+            invalid_chars = set(c for c in s if c not in allowed_chars)
+            raise ValueError(f"{name} contains invalid chars: {invalid_chars}. String: '{s[:10]}...'")
+        counts = Counter(s)
+        if not all(count == 9 for count in counts.values()):
+            raise ValueError(f"{name} must have 9 of each URFDLB char. Counts: {counts}")
+        # Center pieces check: URFDLB order for centers
+        # U: s[4], R: s[13], F: s[22], D: s[31], L: s[40], B: s[49] (Kociemba standard string)
+        # No, Kociemba string is UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB
+        # So centers are s[4], s[13], s[22], s[31], s[40], s[49]
+        centers = [s[4], s[13], s[22], s[31], s[40], s[49]]
+        if len(set(centers)) != 6:
+            raise ValueError(f"{name} center pieces are not unique: {centers}")
+        if centers[0]!='U' or centers[1]!='R' or centers[2]!='F' or \
+           centers[3]!='D' or centers[4]!='L' or centers[5]!='B':
+            raise ValueError(f"{name} center pieces are not U,R,F,D,L,B in order. Got: {centers}")
+
+
+    def _solve_cube_with_kociemba(self, cube_state_frblud_actual_colors: str) -> Optional[str]:
         try:
-            pad_x, pad_y, grid_size = self.last_valid_grid
-            grid_cell_size = grid_size // 3
-            face_colors = []
-            
-            for i in range(3):
-                for j in range(3):
-                    y_start = pad_y + i * grid_cell_size
-                    y_end = pad_y + (i + 1) * grid_cell_size
-                    x_start = pad_x + j * grid_cell_size
-                    x_end = pad_x + (j + 1) * grid_cell_size
-                    
-                    padding = grid_cell_size // 8
-                    y_start += padding
-                    y_end -= padding
-                    x_start += padding
-                    x_end -= padding
-                    
-                    roi = self.last_processed_frame[y_start:y_end, x_start:x_end]
-                    color = self.detect_color(roi)
-                    if not color:
-                        return False
-                    face_colors.append(color)
-            
-            self.u_scans[self.current_scan_idx] = face_colors
-            self.current_scan_idx += 1
-            
-            if self.current_scan_idx < 12:
-                # Send rotation command to Arduino
-                rotation_sequence = [
-                    "",        # Scan 1: Initial U face
-                    "R L'",    # Scan 2
-                    "B F'",    # Scan 3
-                    "R L'",    # Scan 4
-                    "B F'",    # Scan 5
-                    "R L'",    # Scan 6
-                    "B F'",    # Scan 7
-                    "R L'",    # Scan 8
-                    "B F'",    # Scan 9
-                    "R L'",    # Scan 10
-                    "B F'",    # Scan 11
-                    "R L'"     # Scan 12
-                ]
-                if self.current_scan_idx < len(rotation_sequence):
-                    move = rotation_sequence[self.current_scan_idx]
-                    if move:
-                        print(f"\nSending rotation command: {move}")
-                        self.send_arduino_command(move)
-                
-                self.status_message = f"Scan {self.current_scan_idx + 1}/12 captured"
-            else:
-                # All scans complete, send final B F' and process solution
-                print("\nAll scans completed! Processing solution...")
-                print("\nSending final B F' command...")
-                if not self.send_arduino_command("B F'"):
-                    self.mode = "error"
-                    self.error_message = "Failed to execute final B F' command"
-                    return False
-                
-                print("Waiting for motors to stabilize...")
-                time.sleep(self.MOTOR_STABILIZATION_TIME)
-                
-                # Construct cube state and solve
-                cube_state = self.construct_cube_state()
-                if cube_state:
-                    solution = self.solve_cube(cube_state)
-                    if solution:
-                        self.solution = solution
-                        self.mode = "solving"
-                        self.current_solve_move_index = 0
-                        self.total_solve_moves = len(solution.split())
-                        self.status_message = "Solution found, executing moves"
-                        print(f"\nSending solution command: SOLUTION:{solution}")
-                        self.send_arduino_command(solution)
-                    else:
-                        self.mode = "error"
-                        self.error_message = "Could not find solution"
-                else:
-                    self.mode = "error"
-                    self.error_message = "Invalid cube state"
-            
-            return True
-            
-        except Exception as e:
-            self.error_message = f"Scan error: {str(e)}"
-            return False
-    
-    def construct_cube_state(self) -> Optional[str]:
-        """Construct the full cube state from scanned faces."""
-        if len(self.u_scans) != 12 or not all(len(scan) == 9 for scan in self.u_scans):
-            return None
-        
-        cube_state = [''] * 54
-        cube_state[4] = 'B'   # F center
-        cube_state[13] = 'O'  # R center
-        cube_state[22] = 'G'  # B center
-        cube_state[31] = 'R'  # L center
-        cube_state[40] = 'W'  # U center
-        cube_state[49] = 'Y'  # D center
-        
-        cube_state[36:45] = self.u_scans[0]
-        for i in range(54):
-            if not cube_state[i]:
-                cube_state[i] = '-'
-        
-        cube_state[0] = self.u_scans[1][0]
-        cube_state[2] = self.u_scans[1][2]
-        cube_state[3] = self.u_scans[1][3]
-        cube_state[5] = self.u_scans[1][5]
-        cube_state[6] = self.u_scans[1][6]
-        cube_state[8] = self.u_scans[1][8]
-        
-        cube_state[9] = self.u_scans[2][0]
-        cube_state[10] = self.u_scans[2][1]
-        cube_state[11] = self.u_scans[2][2]
-        cube_state[15] = self.u_scans[2][6]
-        cube_state[16] = self.u_scans[2][7]
-        cube_state[17] = self.u_scans[2][8]
-        
-        cube_state[47] = self.u_scans[3][0]
-        cube_state[53] = self.u_scans[3][2]
-        cube_state[1] = self.u_scans[3][3]
-        cube_state[7] = self.u_scans[3][5]
-        cube_state[45] = self.u_scans[3][6]
-        cube_state[51] = self.u_scans[3][8]
-        
-        cube_state[24] = self.u_scans[4][0]
-        cube_state[12] = self.u_scans[4][1]
-        cube_state[18] = self.u_scans[4][2]
-        cube_state[26] = self.u_scans[4][6]
-        cube_state[14] = self.u_scans[4][7]
-        cube_state[20] = self.u_scans[4][8]
-        
-        cube_state[33] = self.u_scans[5][0]
-        cube_state[27] = self.u_scans[5][2]
-        cube_state[50] = self.u_scans[5][3]
-        cube_state[48] = self.u_scans[5][5]
-        cube_state[35] = self.u_scans[5][6]
-        cube_state[29] = self.u_scans[5][8]
-        
-        cube_state[36] = self.u_scans[6][0]
-        cube_state[46] = self.u_scans[6][1]
-        cube_state[38] = self.u_scans[6][2]
-        cube_state[42] = self.u_scans[6][6]
-        cube_state[52] = self.u_scans[6][7]
-        cube_state[44] = self.u_scans[6][8]
-        
-        cube_state[21] = self.u_scans[7][3]
-        cube_state[23] = self.u_scans[7][5]
-        
-        cube_state[34] = self.u_scans[8][1]
-        cube_state[28] = self.u_scans[8][7]
-        
-        cube_state[25] = self.u_scans[9][3]
-        cube_state[19] = self.u_scans[9][5]
-        
-        cube_state[30] = self.u_scans[10][1]
-        cube_state[32] = self.u_scans[10][7]
-        
-        cube_state[39] = self.u_scans[11][3]
-        cube_state[41] = self.u_scans[11][5]
-        
-        # Print the cube state for debugging
-        print("\nConstructed Cube State:")
-        print("Color mapping: W=White, R=Red, G=Green, Y=Yellow, O=Orange, B=Blue")
-        print("\nRaw state:", ''.join(cube_state))
-        print("\nVisual representation:")
-        # Print Up face
-        for i in range(3):
-            start = 36 + i*3  # Up face starts at index 36
-            print("        " + " ".join(cube_state[start:start+3]))
-        # Print middle faces (Front, Right, Back, Left)
-        for i in range(3):
-            line = ""
-            for face_start in [0, 9, 18, 27]:  # F, R, B, L
-                start = face_start + i*3
-                line += " ".join(cube_state[start:start+3]) + " | "
-            print(line[:-3])
-        # Print Down face
-        for i in range(3):
-            start = 45 + i*3  # Down face starts at index 45
-            print("        " + " ".join(cube_state[start:start+3]))
-        
-        return ''.join(cube_state)
-    
-    def print_cube_state(self, cube_state: str):
-        """Print the cube state in a visual format."""
-        print("\nCube State:")
-        print("Color mapping: W=White, R=Red, G=Green, Y=Yellow, O=Orange, B=Blue")
-        print("\nVisual representation:")
-        # Print Up face
-        for i in range(3):
-            start = 36 + i*3  # Up face starts at index 36
-            print("        " + " ".join(cube_state[start:start+3]))
-        # Print middle faces (Front, Right, Back, Left)
-        for i in range(3):
-            line = ""
-            for face_start in [0, 9, 18, 27]:  # F, R, B, L
-                start = face_start + i*3
-                line += " ".join(cube_state[start:start+3]) + " | "
-            print(line[:-3])
-        # Print Down face
-        for i in range(3):
-            start = 45 + i*3  # Down face starts at index 45
-            print("        " + " ".join(cube_state[start:start+3]))
-    
-    def validate_cube(self, cube, order_name):
-        if len(cube) != 54:
-            raise ValueError(f"{order_name} must be 54 characters")
-        counts = Counter(cube)
-        if len(counts) != 6 or any(count != 9 for count in counts.values()):
-            raise ValueError(f"{order_name} invalid: {counts} (need 9 of each of 6 colors)")
+            if self._is_cube_solved_by_face_colors(cube_state_frblud_actual_colors):
+                self.status_message = "Cube is already solved."; print(self.status_message); return ""
 
-    def remap_colors_to_kociemba(self, cube_frblud):
-        self.validate_cube(cube_frblud, "FRBLUD")
-        centers = [cube_frblud[i] for i in [4, 13, 22, 31, 40, 49]]  # F, R, B, L, U, D
-        color_map = {
-            centers[4]: 'U',  # Up
-            centers[1]: 'R',  # Right
-            centers[0]: 'F',  # Front
-            centers[5]: 'D',  # Down
-            centers[3]: 'L',  # Left
-            centers[2]: 'B'   # Back
-        }
-        return color_map, ''.join(color_map[c] for c in cube_frblud)
+            # Centers from FRBLUD string (actual colors from scan)
+            # F:0-8, R:9-17, B:18-26, L:27-35, U:36-44, D:45-53
+            center_F_actual = cube_state_frblud_actual_colors[4]
+            center_R_actual = cube_state_frblud_actual_colors[13]
+            center_B_actual = cube_state_frblud_actual_colors[22]
+            center_L_actual = cube_state_frblud_actual_colors[31]
+            center_U_actual = cube_state_frblud_actual_colors[40]
+            center_D_actual = cube_state_frblud_actual_colors[49]
 
-    def remap_cube_to_kociemba(self, cube_frblud_remapped):
-        front, right, back, left, up, down = [cube_frblud_remapped[i:i+9] for i in range(0, 54, 9)]
-        return up + right + front + down + left + back
+            kociemba_face_map_actual_to_kociemba_notation = {
+                center_U_actual: 'U', center_R_actual: 'R', center_F_actual: 'F',
+                center_D_actual: 'D', center_L_actual: 'L', center_B_actual: 'B'
+            }
+            if len(kociemba_face_map_actual_to_kociemba_notation) != 6:
+                unique_centers_detected = {center_F_actual, center_R_actual, center_B_actual, center_L_actual, center_U_actual, center_D_actual}
+                raise ValueError(f"Invalid centers for Kociemba map. Expected 6 unique actual colors for centers, got {len(unique_centers_detected)}: {unique_centers_detected}")
 
-    def get_solved_state(self, cube_frblud, color_map):
-        centers = [cube_frblud[i] for i in [4, 13, 22, 31, 40, 49]]  # F, R, B, L, U, D
-        return ''.join(c * 9 for c in centers)
+            # Convert FRBLUD (actual colors) to Kociemba notation characters (URFDLB)
+            # The FRBLUD string is already ordered by face.
+            # Face U (actual colors) = cube_state_frblud_actual_colors[36:45]
+            # Face R (actual colors) = cube_state_frblud_actual_colors[9:18]
+            # ...and so on.
+            
+            kociemba_input_str_parts = {
+                'U': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[36:45]]),
+                'R': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[9:18]]),
+                'F': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[0:9]]),
+                'D': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[45:54]]),
+                'L': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[27:36]]),
+                'B': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[18:27]]),
+            }
+            kociemba_input_str = (kociemba_input_str_parts['U'] + kociemba_input_str_parts['R'] + 
+                                  kociemba_input_str_parts['F'] + kociemba_input_str_parts['D'] +
+                                  kociemba_input_str_parts['L'] + kociemba_input_str_parts['B'])
+            
+            self._validate_kociemba_string(kociemba_input_str, "Kociemba Input String (from mapped actual colors)")
+            
+            raw_solution_str = kociemba.solve(kociemba_input_str)
+            print(f"Kociemba raw solution: {raw_solution_str}")
 
-    def is_cube_solved(self, cube_state):
-        """Check if the cube is already solved by verifying each face has the same color."""
-        # Check each face (9 stickers per face)
-        for i in range(0, 54, 9):
-            face = cube_state[i:i+9]
-            # If any sticker is different from the center of the face, cube is not solved
-            if not all(sticker == face[4] for sticker in face):
-                return False
+            u_alg = "R L F2 B2 R' L' D R L F2 B2 R' L'"; up_alg = "R L F2 B2 R' L' D' R L F2 B2 R' L'"; u2_alg = "R L F2 B2 R' L' D2 R L F2 B2 R' L'"
+            
+            final_solution_moves = []
+            for move_token in raw_solution_str.split():
+                if move_token == "U": final_solution_moves.append(u_alg)
+                elif move_token == "U'": final_solution_moves.append(up_alg)
+                elif move_token == "U2": final_solution_moves.append(u2_alg) 
+                else: final_solution_moves.append(move_token)
+            
+            solution_with_urepl = " ".join(final_solution_moves)
+            simplified_solution_str = self._simplify_cube_moves_basic(solution_with_urepl) 
+            
+            print(f"Final solution ({len(simplified_solution_str.split())} moves): {simplified_solution_str}")
+            return simplified_solution_str
+
+        except ValueError as ve: 
+            self.error_message = f"Kociemba ValueError: {ve}"; print(f"! ERROR: {self.error_message}"); return None
+        except KeyError as ke: 
+            self.error_message = f"Kociemba map KeyError: '{ke}'. Color not found in map. FRBLUD state: {cube_state_frblud_actual_colors[:9]}..."
+            print(f"! ERROR: {self.error_message}"); return None
+        except Exception as e: 
+            self.error_message = f"Solve Exception: {type(e).__name__} - {e}"; print(f"! ERROR: {self.error_message}"); return None
+
+    def _is_cube_solved_by_face_colors(self, cube_state_str: str) -> bool:
+        if len(cube_state_str) != 54: return False
+        for i in range(0, 54, 9): 
+            face = cube_state_str[i : i+9]
+            if not all(s == face[4] for s in face): return False
         return True
 
-    def simplify_cube_moves(self, moves_str):
-        # Split the string into individual moves
-        moves = moves_str.strip().split()
-        
-        # Function to get the net effect of a single move
-        def move_value(move):
-            if move.endswith("2"):
-                return 2
-            elif move.endswith("'"):
-                return -1
-            return 1
-        
-        # Function to convert net value back to move notation
-        def value_to_move(face, value):
-            value = value % 4
-            if value == 0:
-                return None
-            elif value == 1:
-                return face
-            elif value == 2:
-                return face + "2"
-            elif value == 3:
-                return face + "'"
-        
-        # Process moves for each face type
-        face_groups = [['L', 'R'], ['F', 'B'], ['U', 'D']]
-        
-        # First pass: Combine consecutive moves of the same face
-        i = 0
+    def _simplify_cube_moves_basic(self, moves_str: str) -> str:
+        moves = [m for m in moves_str.strip().split() if m] 
+        if not moves: return ""
         simplified = []
-        while i < len(moves):
-            current_face = moves[i][0]
-            current_value = move_value(moves[i])
-            
-            # Look ahead for same face moves
-            j = i + 1
-            while j < len(moves) and moves[j][0] == current_face:
-                current_value += move_value(moves[j])
-                j += 1
-                
-            # Add the simplified move if needed
-            move = value_to_move(current_face, current_value)
-            if move:
-                simplified.append(move)
-                
-            i = j
-        
-        # Second pass: Combine moves by face groups
-        final_simplified = []
         i = 0
-        while i < len(simplified):
-            current_face = simplified[i][0]
+        while i < len(moves):
+            current_move = moves[i]
+            if not current_move: i+=1; continue # Should not happen with list comprehension above
             
-            # Find which group this face belongs to
-            face_group = None
-            for group in face_groups:
-                if current_face in group:
-                    face_group = group
-                    break
-            
-            if face_group:
-                # Count moves for each face in this group
-                counts = {face: 0 for face in face_group}
-                j = i
-                
-                # Collect consecutive moves in this group
-                while j < len(simplified) and simplified[j][0] in face_group:
-                    face = simplified[j][0]
-                    counts[face] += move_value(simplified[j])
-                    j += 1
-                    
-                # Add simplified moves for this group
-                for face in face_group:
-                    move = value_to_move(face, counts[face])
-                    if move:
-                        final_simplified.append(move)
-                        
-                i = j
-            else:
-                # For faces not in any group (which shouldn't happen with standard cube notation)
-                final_simplified.append(simplified[i])
+            face = current_move[0]
+            # Check if it's a valid face character
+            if face not in ['F', 'B', 'R', 'L', 'D', 'U']: # Assuming U moves are already expanded
+                simplified.append(current_move) # Not a standard rotatable face, pass through
                 i += 1
-        
-        return " ".join(final_simplified) if final_simplified else "No moves"
+                continue
 
-    def solve_cube(self, cube_frblud):
-        """Solve the cube using kociemba algorithm."""
-        try:
-            # First check if cube is already solved
-            if self.is_cube_solved(cube_frblud):
-                print("\nCube is already solved! No moves needed.")
-                return ""
+            net_rot = 0
+            j = i
+            while j < len(moves):
+                m = moves[j]
+                if not m or m[0] != face: # End of sequence for this face
+                    break
                 
-            # If not solved, proceed with normal solving process
-            color_map, cube_frblud_remapped = self.remap_colors_to_kociemba(cube_frblud)
-            scrambled_kociemba = self.remap_cube_to_kociemba(cube_frblud_remapped)
-            solved_frblud = self.get_solved_state(cube_frblud, color_map)
-            _, solved_frblud_remapped = self.remap_colors_to_kociemba(solved_frblud)
-            solved_kociemba = self.remap_cube_to_kociemba(solved_frblud_remapped)
+                val = 1
+                if len(m) > 1:
+                    if m[1] == '2': val = 2
+                    elif m[1] == "'": val = 3
+                net_rot = (net_rot + val) % 4
+                j += 1
             
-            print("\nValidating cube states...")
-            self.validate_cube(scrambled_kociemba, "Scrambled Kociemba")
-            self.validate_cube(solved_kociemba, "Solved Kociemba")
-            
-            print("\nScrambled Kociemba state:", scrambled_kociemba)
-            print("Solved Kociemba state:", solved_kociemba)
-            
-            print("\nAttempting to solve with kociemba...")
-            solution = kociemba.solve(scrambled_kociemba, solved_kociemba)
-            print("Raw solution from kociemba:", solution)
-            
-            u_replacement = "R L F2 B2 R' L' D R L F2 B2 R' L'"
-            u_prime_replacement = "R L F2 B2 R' L' D' R L F2 B2 R' L'"
-            u2_replacement = "R L F2 B2 R' L' D2 R L F2 B2 R' L'"
-            
-            moves = solution.split()
-            modified_solution = []
-            for move in moves:
-                if move == "U":
-                    modified_solution.append(u_replacement)
-                elif move == "U'":
-                    modified_solution.append(u_prime_replacement)
-                elif move == "U2":
-                    modified_solution.append(u2_replacement)
-                else:
-                    modified_solution.append(move)
-            
-            final_solution = " ".join(modified_solution)
-            
-            # Optimize the solution using simplify_cube_moves
-            optimized_solution = self.simplify_cube_moves(final_solution)
-            print("\nOriginal solution length:", len(final_solution.split()))
-            print("Optimized solution length:", len(optimized_solution.split()))
-            
-            return optimized_solution
-        
-        except Exception as e:
-            print(f"\nError in solve_cube: {str(e)}")
-            self.error_message = f"Solve error: {str(e)}"
-            return None
-    
+            if net_rot == 1: simplified.append(face)
+            elif net_rot == 2: simplified.append(face + "2")
+            elif net_rot == 3: simplified.append(face + "'")
+            # net_rot == 0 means moves cancelled out, append nothing
+            i = j
+        return " ".join(simplified)
+
     def scramble_cube(self) -> bool:
-        """Generate and execute a random scramble sequence."""
         if self.mode not in ["idle", "error"]:
-            return False
-        
+            self.error_message = "Cannot scramble, busy."; self.status_message = self.error_message; return False
         try:
-            # Generate random scramble (no U moves)
-            basic_moves = ['F', 'B', 'R', 'L', 'D']  # No U moves as we can't execute them
-            modifiers = ['', '\'', '2']
-            scramble = []
-            last_face = None
+            possible_faces = ['F', 'B', 'R', 'L', 'D']; modifiers = ['', "'", '2'] # No U moves in basic scramble
+            scramble_moves_list = []
             
-            for _ in range(20):  # 20 moves scramble
-                # Don't allow same face moves consecutively
-                available_moves = [move for move in basic_moves if move != last_face]
-                face = random.choice(available_moves)
-                modifier = random.choice(modifiers)
-                scramble.append(face + modifier)
-                last_face = face
+            for _ in range(random.randint(18, 22)): # Typical scramble length
+                chosen_face = random.choice(possible_faces)
+                # Avoid redundant moves like F F or F F'
+                if scramble_moves_list and chosen_face == scramble_moves_list[-1][0]:
+                    available_faces = [f for f in possible_faces if f != chosen_face]
+                    if not available_faces : continue 
+                    chosen_face = random.choice(available_faces)
+                
+                chosen_modifier = random.choice(modifiers)
+                scramble_moves_list.append(chosen_face + chosen_modifier)
             
-            scramble_sequence = " ".join(scramble)
-            self.mode = "scrambling"
-            self.status_message = "Executing scramble sequence"
-            self.current_solve_move_index = 0
-            self.total_solve_moves = len(scramble)
+            scramble_sequence = " ".join(scramble_moves_list)
+            self.mode = "scrambling"; self.status_message = f"Scrambling: {scramble_sequence[:30]}..."
+            self._reset_solve_state() 
+            self.total_solve_moves = len(scramble_moves_list) 
+            print(f"Generated scramble: {scramble_sequence}")
             
-            # Send scramble to Arduino and wait for completion
-            if not self.send_arduino_command(scramble_sequence):
-                self.mode = "error"
-                self.error_message = "Failed to execute scramble sequence"
+            if self.send_arduino_command(scramble_sequence, is_solution=True): # Treat as solution for ack logic
+                # Arduino command handler might set mode to idle on success
+                if self.mode != "idle":
+                    self.mode = "idle"
+                    self.status_message = "Scramble completed."
+                self._reset_solve_state() # Ensure it's clean after
+                return True
+            else:
+                self.mode = "idle" 
+                self.error_message = self.error_message or "Failed to execute scramble on Arduino."
+                self.status_message = self.error_message
+                self._reset_solve_state()
                 return False
-            
-            # Return to idle mode
-            self.mode = "idle"
-            self.status_message = "Scramble completed - Ready for next command"
-            self.current_solve_move_index = 0
-            self.total_solve_moves = 0
-            return True
-            
         except Exception as e:
-            self.error_message = f"Scramble error: {str(e)}"
-            self.mode = "error"
-            return False
-    
-    def stop(self):
-        """Stop any ongoing operation."""
+            self.error_message = f"Scramble error: {type(e).__name__} - {e}"; self.status_message = "Scramble gen failed."
+            self.mode = "error"; return False
+
+    def stop_current_operation(self):
+        print(f"Stop requested. Current mode: {self.mode}")
         self.stop_requested = True
         if self.serial_connection and self.serial_connection.is_open:
-            try:
-                self.serial_connection.write("STOP\n".encode('ascii'))
-                self.serial_connection.flush()
-            except:
-                pass
-        
-        self.mode = "idle"
-        self.status_message = "Operation stopped"
+            try: 
+                self.serial_connection.write("STOP\n".encode('utf-8')) 
+                self.serial_connection.flush(); print("Sent STOP command to Arduino.")
+            except Exception as e: print(f"Error sending STOP command: {e}")
+
+        self.mode = "idle"; self.status_message = "Operation stopped by user."
         self.error_message = None
+        self._reset_solve_state()
+        self._reset_scan_state()
+        self.stop_requested = False # Reset for next operation
+        print(self.status_message)
     
-    def get_state(self) -> Dict[str, Any]:
-        """Get the current game state."""
-        return {
-            "mode": self.mode,
-            "status_message": self.status_message,
-            "calibration_step": self.calibration_step if self.mode == "calibrating" else None,
-            "current_color": self.COLOR_NAMES[self.calibration_step] if self.mode == "calibrating" and self.calibration_step < len(self.COLOR_NAMES) else None,
-            "scan_index": self.current_scan_idx if self.mode == "scanning" else None,
-            "solve_move_index": self.current_solve_move_index if self.mode in ["solving", "scrambling"] else 0,
-            "total_solve_moves": self.total_solve_moves if self.mode in ["solving", "scrambling"] else 0,
-            "solution": self.solution if self.solution else None,
-            "error_message": self.error_message if self.mode == "error" else None,
-            "serial_connected": self.serial_connection is not None and self.serial_connection.is_open
-        } 
+    def _construct_cube_state_from_scans(self) -> Optional[str]:
+        if len(self.u_scans) != 12 or not all(self.u_scans[i] and len(self.u_scans[i]) == 9 for i in range(12)):
+            self.error_message = "Invalid or incomplete scan data for cube construction."
+            print(f"! CONSTRUCT ERROR: {self.error_message}")
+            for i, scan_face in enumerate(self.u_scans): print(f"  Scan {i+1}: {scan_face if scan_face else 'MISSING'}")
+            return None
+        
+        # Crucial: Determine actual center colors from scans if they are reliable,
+        # or use predefined ones if they are absolutely fixed for your setup.
+        # For now, assume predefined standard Western colors.
+        # F=Green, R=Red, B=Blue, L=Orange, U=White, D=Yellow
+        # If u_scans[0] is U face, u_scans[0][4] is W.
+        # If u_scans[X] is F face (after rotations), u_scans[X][4] is G.
+        # This depends on your physical cube's color scheme AND the initial orientation.
+
+        # Using scanned centers where possible (safer if calibration is good)
+        # Map: U=scan0[4], F=scan1[4], R=scan2[4], D=scan3[4], B=scan4[4], L=scan5[4]
+        # This mapping of scan index to face center depends heavily on rotation_sequence
+        # and which face is presented to the camera after each rotation.
+        # The original code had fixed centers G,R,B,O,W,Y. We will use those
+        # for the fixed slots in temp_cube_state, but use the scanned sticker values
+        # for filling the rest of the cube.
+
+        temp_cube_state = ['X'] * 54 
+        # FRBLUD order for temp_cube_state array
+        # F: 0-8, R: 9-17, B: 18-26, L: 27-35, U: 36-44, D: 45-53
+        
+        # Fixed centers based on a standard color scheme relative to initial U-F orientation
+        center_F_actual = self.u_scans[1][4] if self.u_scans[1] and len(self.u_scans[1])==9 else 'G' # Example: scan 1 is F
+        center_R_actual = self.u_scans[2][4] if self.u_scans[2] and len(self.u_scans[2])==9 else 'R' # Example: scan 2 is R
+        center_B_actual = self.u_scans[4][4] if self.u_scans[4] and len(self.u_scans[4])==9 else 'B' # Example: scan 4 is B
+        center_L_actual = self.u_scans[5][4] if self.u_scans[5] and len(self.u_scans[5])==9 else 'O' # Example: scan 5 is L
+        center_U_actual = self.u_scans[0][4] if self.u_scans[0] and len(self.u_scans[0])==9 else 'W' # Example: scan 0 is U
+        center_D_actual = self.u_scans[3][4] if self.u_scans[3] and len(self.u_scans[3])==9 else 'Y' # Example: scan 3 is D
+        # This assumes scan N shows face N's center. This must be correct.
+        # If any scan is bad, 'X' might be used. Fallback to default if so.
+        
+        # Standard Western fixed centers (overrides scanned centers if you prefer fixed ones)
+        # This is often more robust if center detection is noisy.
+        predefined_centers = {'F':'G', 'R':'R', 'B':'B', 'L':'O', 'U':'W', 'D':'Y'}
+
+        temp_cube_state[4]  = predefined_centers['F'] 
+        temp_cube_state[13] = predefined_centers['R'] 
+        temp_cube_state[22] = predefined_centers['B'] 
+        temp_cube_state[31] = predefined_centers['L'] 
+        temp_cube_state[40] = predefined_centers['U'] 
+        temp_cube_state[49] = predefined_centers['D'] 
+
+        # Fill U face (indices 36-44) from u_scans[0]
+        # The piece u_scans[0][i] is the i-th sticker of the U face.
+        # Kociemba U face: UBL UBM UBR UML UMM UMR UFL UFM UFR
+        # Our scan: 0 1 2 / 3 4 5 / 6 7 8 (top-left to bottom-right)
+        # Assuming scan 0 is U face directly:
+        for i in range(9):
+            if i == 4: continue # Center already set
+            temp_cube_state[36+i] = self.u_scans[0][i]
+        
+        # The complex mapping from your previous code. This is VERY hard to debug without knowing
+        # the exact physical sequence of scans and rotations.
+        # It maps stickers from various u_scans (which are raw 9-sticker face views)
+        # to their correct cubie positions in the FRBLUD string.
+        try: 
+            temp_cube_state[0]=self.u_scans[1][0]; temp_cube_state[1]=self.u_scans[3][3]; temp_cube_state[2]=self.u_scans[1][2]
+            temp_cube_state[3]=self.u_scans[1][3]; # temp_cube_state[4] is F-center (set above)
+            temp_cube_state[5]=self.u_scans[1][5]
+            temp_cube_state[6]=self.u_scans[1][6]; temp_cube_state[7]=self.u_scans[3][5]; temp_cube_state[8]=self.u_scans[1][8]
+            
+            temp_cube_state[9]=self.u_scans[2][0]; temp_cube_state[10]=self.u_scans[2][1]; temp_cube_state[11]=self.u_scans[2][2]
+            temp_cube_state[12]=self.u_scans[4][1]; # temp_cube_state[13] is R-center
+            temp_cube_state[14]=self.u_scans[4][7]
+            temp_cube_state[15]=self.u_scans[2][6]; temp_cube_state[16]=self.u_scans[2][7]; temp_cube_state[17]=self.u_scans[2][8]
+
+            temp_cube_state[18]=self.u_scans[4][2]; temp_cube_state[19]=self.u_scans[9][5]; temp_cube_state[20]=self.u_scans[4][8]
+            temp_cube_state[21]=self.u_scans[7][3]; # temp_cube_state[22] is B-center
+            temp_cube_state[23]=self.u_scans[7][5]
+            temp_cube_state[24]=self.u_scans[4][0]; temp_cube_state[25]=self.u_scans[9][3]; temp_cube_state[26]=self.u_scans[4][6]
+
+            temp_cube_state[27]=self.u_scans[5][2]; temp_cube_state[28]=self.u_scans[8][7]; temp_cube_state[29]=self.u_scans[5][8]
+            temp_cube_state[30]=self.u_scans[10][1]; # temp_cube_state[31] is L-center
+            temp_cube_state[32]=self.u_scans[10][7]
+            temp_cube_state[33]=self.u_scans[5][0]; temp_cube_state[34]=self.u_scans[8][1]; temp_cube_state[35]=self.u_scans[5][6]
+            
+            # U face (36-44) - scan0 was already used, but some specific pieces are overwritten
+            # This implies certain scans give better views of specific U-face edge/corner stickers.
+            temp_cube_state[36]=self.u_scans[6][0]; temp_cube_state[37]=self.u_scans[0][1]; temp_cube_state[38]=self.u_scans[6][2];
+            temp_cube_state[39]=self.u_scans[11][3]; # temp_cube_state[40] is U-center (from scan 0 via initial set)
+            temp_cube_state[41]=self.u_scans[11][5];
+            temp_cube_state[42]=self.u_scans[6][6]; temp_cube_state[43]=self.u_scans[0][7]; temp_cube_state[44]=self.u_scans[6][8];
+            
+            # D face (45-53)
+            temp_cube_state[45]=self.u_scans[3][6]; temp_cube_state[46]=self.u_scans[6][1]; temp_cube_state[47]=self.u_scans[3][0]
+            temp_cube_state[48]=self.u_scans[5][5]; # temp_cube_state[49] is D-center
+            temp_cube_state[50]=self.u_scans[5][3]
+            temp_cube_state[51]=self.u_scans[3][8]; temp_cube_state[52]=self.u_scans[6][7]; temp_cube_state[53]=self.u_scans[3][2]
+
+        except IndexError as e:
+            self.error_message = f"IndexError in cube construction: {e}. A scan might be missing or malformed."
+            print(f"! CONSTRUCT ERROR: {self.error_message}")
+            # Print u_scans for debugging
+            for i_scan, scan_data in enumerate(self.u_scans):
+                print(f"  Scan {i_scan}: {scan_data}")
+            return None
+        
+        final_cube_state_str = "".join(temp_cube_state)
+        counts = Counter(final_cube_state_str)
+        
+        # Validate counts against the predefined center colors
+        expected_actual_colors_from_centers = set(predefined_centers.values())
+        
+        valid_colors_ok = True
+        for color_char in expected_actual_colors_from_centers:
+            if counts.get(color_char, 0) != 9:
+                valid_colors_ok = False
+                break
+        
+        if not valid_colors_ok or 'X' in counts : 
+            self.error_message = f"Constructed state invalid. Counts: {counts}. Final: {final_cube_state_str}"
+            print(f"! CONSTRUCT ERROR: {self.error_message}")
+            return None
+            
+        return final_cube_state_str
+
+    def _print_cube_state_visual(self, state_str_frblud: str, title: str = "Cube State (FRBLUD)"):
+        """Prints the cube state in a visual format. Input string is FRBLUD."""
+        if len(state_str_frblud) != 54:
+            print(f"Error printing cube state: Expected 54 chars, got {len(state_str_frblud)}")
+            return
+
+        F = state_str_frblud[0:9]; R = state_str_frblud[9:18]; B = state_str_frblud[18:27]
+        L = state_str_frblud[27:36]; U = state_str_frblud[36:45]; D = state_str_frblud[45:54]
+
+        print(f"\n--- {title} ---")
+        
+        def print_face_row(face_str, row_idx, prefix="   "):
+            print(f"{prefix}{face_str[row_idx*3]} {face_str[row_idx*3+1]} {face_str[row_idx*3+2]}")
+
+        # Print U face
+        for r in range(3): print_face_row(U, r, "      ")
+        print("      ---------")
+        
+        # Print L, F, R, B faces side-by-side
+        for r in range(3):
+            l_s = f"{L[r*3]} {L[r*3+1]} {L[r*3+2]}"
+            f_s = f"{F[r*3]} {F[r*3+1]} {F[r*3+2]}"
+            r_s = f"{R[r*3]} {R[r*3+1]} {R[r*3+2]}"
+            b_s = f"{B[r*3]} {B[r*3+1]} {B[r*3+2]}"
+            print(f"{l_s} | {f_s} | {r_s} | {b_s}")
+        print("      ---------")
+
+        # Print D face
+        for r in range(3): print_face_row(D, r, "      ")
+        print("--- End of Cube State ---\n")
+
+# Example usage (outside class, for testing if run directly)
+if __name__ == '__main__':
+    game = RubiksCubeGame()
+    print("RubiksCubeGame instance created.")
+    print(f"Initial zoom: {game.zoom_crop_factor}, Initial distance factor: {game.relative_detection_distance}")
+    print(f"Initial MinArea: {game.MIN_CONTOUR_AREA}, MaxArea: {game.MAX_CONTOUR_AREA}")
+
+    game.set_zoom_crop_factor(2.0)
+    game.set_relative_detection_distance(0.5) # Cube is closer
+    print(f"After changes: zoom: {game.zoom_crop_factor}, distance factor: {game.relative_detection_distance}")
+    print(f"New MinArea: {game.MIN_CONTOUR_AREA}, MaxArea: {game.MAX_CONTOUR_AREA}")
+    
+    game.set_relative_detection_distance(2.0) # Cube is further
+    print(f"After distance change: zoom: {game.zoom_crop_factor}, distance factor: {game.relative_detection_distance}")
+    print(f"New MinArea: {game.MIN_CONTOUR_AREA}, MaxArea: {game.MAX_CONTOUR_AREA}")
+
+    # Test simplify moves
+    # test_moves = "F B' R R R L2 L2 U D' D D D U' U' U' F2" # U needs to be expanded first
+    # For simplify test, assume U is already expanded or not present
+    test_moves_simple = "F B' R R R L2 L2 D' D D D F2"
+    simplified = game._simplify_cube_moves_basic(test_moves_simple)
+    print(f"Original simple: '{test_moves_simple}' -> Simplified: '{simplified}' (Expected: F B' R' D F2)")
+
+    test_moves_cancel = "F F' R R2 B B B"
+    simplified_cancel = game._simplify_cube_moves_basic(test_moves_cancel)
+    print(f"Original cancel: '{test_moves_cancel}' -> Simplified: '{simplified_cancel}' (Expected: R' B')")
+
+    test_empty = ""
+    simplified_empty = game._simplify_cube_moves_basic(test_empty)
+    print(f"Original empty: '{test_empty}' -> Simplified: '{simplified_empty}' (Expected: '')")
+
+    test_single = "F2"
+    simplified_single = game._simplify_cube_moves_basic(test_single)
+    print(f"Original single: '{test_single}' -> Simplified: '{simplified_single}' (Expected: F2)")
