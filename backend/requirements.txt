@@ -8,4 +8,8 @@ pygame
 keras
 pillow
 tensorflow
+ultralytics
 pyserial
+kociemba
+scipy
+webcolors

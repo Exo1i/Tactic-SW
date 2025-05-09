@@ -1,17 +1,15 @@
 "use client";
-import React, {useCallback, useEffect, useRef, useState} from 'react';
-import "../../globals.css";
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import "../../globals.css"; // Ensure this path is correct for your project structure
 
 // --- Constants ---
 const GRID_ROWS = 2;
-const GRID_COLS = 4;
+const GRID_COLS = 4; // Ensure this matches backend's GRID_COLS for grid-cols-X class
 const CARD_COUNT = GRID_ROWS * GRID_COLS;
-const BOARD_DETECT_WIDTH = 400; // Must match backend
+const BOARD_DETECT_WIDTH = 400; // Must match backend if used for frontend calculations
 const BOARD_DETECT_HEIGHT = 200; // Must match backend
 
 // Map backend names to Tailwind colors or hex codes
-// Use Tailwind classes for better consistency if possible (e.g., 'bg-red-500')
-// Using hex codes here for flexibility with specific shades.
 const colorMap = {
     red: '#ef4444',    // Tailwind red-500
     yellow: '#facc15', // Tailwind yellow-400
@@ -25,8 +23,11 @@ const colorMap = {
     banana: '#fde047', // Tailwind yellow-300
     'fire hydrant': '#e11d48', // Tailwind rose-600
     person: '#78716c', // Tailwind stone-500
-    'detect_fail': '#6b7280', // Tailwind gray-500
-    'default_flipped': '#d1d5db', // Tailwind gray-300
+    'detect_fail': '#6b7280', // Tailwind gray-500 (for error/unknown states)
+    'perma_fail': '#4b5563', // Tailwind gray-600 (for permanent detection failure)
+    'unknown': '#9ca3af',   // Tailwind gray-400
+    'default_flipped': '#d1d5db', // Tailwind gray-300 (default background for flipped cards if no specific color)
+    'black': '#1f2937', // Tailwind gray-800 (for card back if detected as 'black')
 };
 
 export default function MemoryGame() {
@@ -34,93 +35,122 @@ export default function MemoryGame() {
     const [isConnected, setIsConnected] = useState(false);
     const [videoSrc, setVideoSrc] = useState('');
     const [transformedVideoSrc, setTransformedVideoSrc] = useState('');
-    const [gameState, setGameState] = useState(null); // Holds card_states, pairs_found, current_flipped
+    const [gameState, setGameState] = useState({ // Initialize with a default structure
+        card_states: {},
+        pairs_found: 0,
+        current_flipped: [],
+    });
     const [message, setMessage] = useState('Select game version to start.');
-    const [lastMessageTime, setLastMessageTime] = useState(0); // Throttle rapid messages
+    const [lastMessageTime, setLastMessageTime] = useState(0);
     const [isGameOver, setIsGameOver] = useState(false);
-    const [showError, setShowError] = useState(null); // Display errors prominently
+    const [showError, setShowError] = useState(null);
     const websocket = useRef(null);
 
-    // Debounced message update
     const updateMessage = useCallback((newMessage, isError = false) => {
         const now = Date.now();
-        // Update immediately for errors or if enough time has passed
         if (isError || now - lastMessageTime > 300) {
             setMessage(newMessage);
             setLastMessageTime(now);
             if (isError) {
                 setShowError(newMessage);
-                // Auto-hide error after some time
-                setTimeout(() => setShowError(null), 5000);
-            } else {
-                setShowError(null); // Clear previous error on normal message
+                setTimeout(() => setShowError(null), 7000); // Longer display for errors
+            } else if (showError && !isError) { // Clear error only if current message is not an error
+                setShowError(null);
             }
         }
-    }, [lastMessageTime]);
+    }, [lastMessageTime, showError]); // Added showError dependency
 
-
-    const connectWebSocket = useCallback((version) => {
-        if (websocket.current) {
-            websocket.current.close();
-        }
-        setMessage(`Connecting to ${version} game...`);
-        setIsGameOver(false);
-        setGameState(null); // Reset game state on new connection attempt
+    const resetGameStates = () => {
+        setIsConnected(false);
         setVideoSrc('');
         setTransformedVideoSrc('');
+        setGameState({ card_states: {}, pairs_found: 0, current_flipped: [] });
+        setIsGameOver(false);
+        setShowError(null);
+        // message will be updated by connect or disconnect handlers
+    };
 
+    const connectWebSocket = useCallback((version) => {
+        if (websocket.current && websocket.current.readyState === WebSocket.OPEN) {
+            console.log("WebSocket already open for", version);
+            // Potentially send a re-init or new game command if backend supports it
+            // For now, we assume main.py handles new connection as a new game session
+            return;
+        }
+        if (websocket.current) {
+            websocket.current.close(1000, "Starting new connection");
+        }
 
-        // Adjust protocol and hostname/port as needed
+        resetGameStates(); // Reset UI states before new connection
+        updateMessage(`Connecting to ${version} game...`);
+
+        const backendWsHost = process.env.NEXT_PUBLIC_BACKEND_WS_URL || `${window.location.hostname}:8000`;
         const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-        const wsUrl = `${wsProtocol}${window.location.hostname}:8000/ws/memory-matching`; // Use centralized endpoint
+        const wsUrl = `${wsProtocol}${backendWsHost}/ws/${version}`;
+
         console.log(`Attempting to connect to: ${wsUrl}`);
         websocket.current = new WebSocket(wsUrl);
 
         websocket.current.onopen = () => {
-            console.log('WebSocket Connected');
+            console.log('WebSocket Connected to', version);
             setIsConnected(true);
-            setMessage(`${version.charAt(0).toUpperCase() + version.slice(1)} game connected. Waiting for start...`);
-            // Send config message to select mode
-            websocket.current.send(JSON.stringify({mode: version}));
+            updateMessage(`${version.charAt(0).toUpperCase() + version.slice(1)} game connected. Initializing...`);
         };
 
         websocket.current.onclose = (event) => {
             console.log(`WebSocket Disconnected: Code=${event.code}, Reason=${event.reason}`);
-            setIsConnected(false);
-            setVideoSrc('');
-            setTransformedVideoSrc('');
-            setGameState(null);
-            if (!isGameOver) {
-                setMessage(`Disconnected (${event.code}). Select game version to reconnect.`);
-                setGameVersion(null); // Allow re-selection only if not game over
-            } else {
-                setMessage(`Game Over! Disconnected. Select version to play again.`);
-                // Keep gameVersion set so UI doesn't disappear? Or clear it? Let's clear.
-                // setGameVersion(null);
+            const stillGameOver = isGameOver; // Capture state before reset
+            resetGameStates(); // Reset UI states
+
+            if (event.code === 1000 && stillGameOver) { // Normal close after game over
+                updateMessage(`Game Over! Disconnected. Select version to play again.`);
+            } else if (event.code === 1000) { // Normal close by client/cleanup
+                updateMessage("Disconnected. Select game version to start.");
+            } else if (!stillGameOver) { // Abnormal close and not game over
+                updateMessage(`Disconnected (Code: ${event.code}). Select game to reconnect.`, true);
+            } else { // Abnormal close but game was over
+                 updateMessage(`Game Over! Disconnected (Code: ${event.code}). Select version to play again.`);
             }
+            setGameVersion(null); // Allow re-selection
             websocket.current = null;
         };
 
-        websocket.current.onerror = (error) => {
-            console.error('WebSocket Error:', error);
-            // Try to get more specific error info if possible
-            const errorMsg = error.message || (error.target?.url ? `Failed to connect to ${error.target.url}` : 'Connection failed.');
-            setMessage(`WebSocket Error: ${errorMsg}`);
-            setIsConnected(false);
-            setVideoSrc('');
-            setTransformedVideoSrc('');
-            setGameState(null);
+        websocket.current.onerror = (errorEvent) => {
+            console.error('WebSocket Error:', errorEvent);
+            // Attempt to get a more specific message if available
+            let specificError = "Connection failed.";
+            if (errorEvent && errorEvent.message) {
+                specificError = errorEvent.message;
+            } else if (websocket.current && websocket.current.url) {
+                specificError = `Failed to connect to ${websocket.current.url}`;
+            }
+            updateMessage(`WebSocket Error: ${specificError}`, true);
+            resetGameStates();
             setGameVersion(null); // Allow re-selection on error
-            websocket.current = null;
+            if (websocket.current) { // Ensure it's fully nulled out after error
+                websocket.current.onclose = null; // Prevent further onclose calls
+                websocket.current.onerror = null;
+                // websocket.current.close(); // It's likely already closed or in error state
+                websocket.current = null;
+            }
         };
 
         websocket.current.onmessage = (event) => {
+            console.log("Raw WS Data Received:", event.data); // <--- ADD THIS LINE
             try {
                 const data = JSON.parse(event.data);
-                // console.log("WS Message Type:", data.type); // Debug
-
+                console.log("Parsed WS Data:", data); // Log parsed data too
+        
+                // Check if data or data.type is null/undefined immediately after parsing
+                if (!data || typeof data.type === 'undefined') {
+                    console.error("Parsed data is missing 'type' property!", data);
+                    // Handle this specific error? Maybe updateMessage?
+                    updateMessage("Received invalid message format from server.", true);
+                    // Don't proceed with the switch statement if type is missing
+                    return;
+                }
+        
                 switch (data.type) {
-                    // Combined frame update message
                     case 'frame_update':
                         if (data.payload?.frame) {
                             setVideoSrc(`data:image/jpeg;base64,${data.payload.frame}`);
@@ -128,290 +158,321 @@ export default function MemoryGame() {
                         if (data.payload?.transformed_frame) {
                             setTransformedVideoSrc(`data:image/jpeg;base64,${data.payload.transformed_frame}`);
                         } else {
-                            // Explicitly clear if not sent, e.g., if board detection fails
+                            // Optional: Clear if not sent consistently to indicate loss of board detection
                             // setTransformedVideoSrc('');
                         }
                         break;
                     case 'game_state':
-                        console.log("Game State Update:", data.payload);
-                        // Expecting payload: { card_states: {...}, pairs_found: X, current_flipped: [...] }
+                        // console.log("Game State Update:", data.payload);
                         if (data.payload && typeof data.payload === 'object' && data.payload.card_states) {
-                            // Update the whole game state object
-                            setGameState(prevState => ({...prevState, ...data.payload}));
+                            setGameState(prevState => ({ ...prevState, ...data.payload }));
                         } else {
-                            console.warn("Received game_state with unexpected structure:", data.payload)
+                            console.warn("Received game_state with unexpected structure:", data.payload);
                         }
                         break;
                     case 'arm_status':
-                        console.log("Arm Status:", data.payload);
-                        setMessage(`Arm: ${data.payload?.action} ${data.payload?.success ? 'OK ✅' : 'Failed ❌'}`);
-                        // Optionally highlight card briefly on action?
+                        updateMessage(`Arm: ${data.payload?.action} ${data.payload?.success ? 'OK ✅' : 'Failed ❌'}`);
                         break;
-                    case 'cards_hidden':
-                        // This might not be needed if game_state updates handle the visual change correctly
-                        console.log("Cards hidden:", data.payload);
-                        setMessage(`Cards ${data.payload.join(' & ')} returned.`);
-                        // Trigger short visual cue? Or rely on game_state removing them from current_flipped?
+                    case 'cards_hidden': // This message might be redundant if game_state updates are sufficient
+                        // updateMessage(`Cards ${data.payload.join(' & ')} returned.`);
                         break;
                     case 'message':
-                        console.log("Message:", data.payload);
-                        setMessage(data.payload);
+                        updateMessage(data.payload);
                         break;
                     case 'game_over':
-                        console.log("Game Over:", data.payload);
-                        setMessage(`Game Over! ${data.payload}`);
+                        updateMessage(`Game Over! ${data.payload}`);
                         setIsGameOver(true);
-                        // Optional: Close WS after timeout?
-                        // setTimeout(() => websocket.current?.close(), 5000);
+                        // Backend should manage WS closure or keep alive. Client can close after a delay if desired.
+                        // setTimeout(() => {
+                        //     if (websocket.current && websocket.current.readyState === WebSocket.OPEN) {
+                        //         websocket.current.close(1000, "Game ended");
+                        //     }
+                        // }, 5000);
                         break;
                     case 'error':
-                        console.error('Game Error from Server:', data.payload);
-                        setMessage(`Error: ${data.payload}`);
-                        // Decide if error is fatal
-                        if (data.payload.includes("Failed to initialize serial port") || data.payload.includes("Critical Game Error")) {
-                            websocket.current?.close(); // Close connection
-                            setGameVersion(null); // Reset selection
+                        updateMessage(`Server Error: ${data.payload}`, true);
+                        // Fatal errors from backend might require client to disconnect and reset
+                        if (data.payload.toLowerCase().includes("serial") || data.payload.toLowerCase().includes("critical") || data.payload.toLowerCase().includes("model failed")) {
+                            if (websocket.current && websocket.current.readyState === WebSocket.OPEN) {
+                                websocket.current.close(1007, "Fatal server error"); // 1007: Invalid frame payload data
+                            }
+                            setGameVersion(null); // Force re-selection
                         }
                         break;
-                    default:
-                        console.warn('Unknown message type:', data.type);
+                        default:
+                            console.warn('Unknown message type:', data.type, data.payload); // Log payload too
+                    }
+                } catch (error) {
+                    console.error('Failed to parse WebSocket message:', error);
+                    // Raw data already logged above
+                    updateMessage("Error processing message from server.", true);
                 }
-            } catch (error) {
-                console.error('Failed to parse WebSocket message:', error);
-                console.log("Raw WS Data:", event.data); // Log raw data for debugging
-            }
-        };
-    }, [isGameOver]); // Add isGameOver dependency
+            };
+    }, [isGameOver, updateMessage]); // isGameOver, updateMessage are dependencies
 
-    // Effect to connect/disconnect WebSocket based on gameVersion
     useEffect(() => {
         if (gameVersion) {
             connectWebSocket(gameVersion);
         }
-        // Cleanup function: Close WebSocket when component unmounts or gameVersion changes *to null*
         return () => {
             if (websocket.current) {
-                console.log("Closing WebSocket connection via cleanup effect.");
-                websocket.current.onclose = null; // Prevent onclose handler from triggering state updates during cleanup
-                websocket.current.close(1000, "Client changing version or unmounting");
+                console.log("Closing WebSocket via main effect cleanup.");
+                websocket.current.onclose = null;
+                websocket.current.onerror = null;
+                if (websocket.current.readyState === WebSocket.OPEN || websocket.current.readyState === WebSocket.CONNECTING) {
+                   websocket.current.close(1000, "Client unmounting or changing game version");
+                }
                 websocket.current = null;
-                setIsConnected(false);
-                // Don't reset gameVersion here, let the selection logic handle it
+                resetGameStates(); // Ensure UI is clean
             }
         };
     }, [gameVersion, connectWebSocket]);
 
-    // Button Handlers
     const handleVersionSelect = (version) => {
-        if (!isConnected && !gameVersion) {
-            setGameVersion(version); // Triggers useEffect
-        } else if (isGameOver || !isConnected) {
-            // Reset flow: Set version to null first to trigger cleanup, then set new version
-            setGameVersion(null);
-            setTimeout(() => {
-                setGameVersion(version);
-            }, 50); // Short delay
+        if (gameVersion === version && isConnected) return; // Already connected to this version
+
+        if (websocket.current) { // If there's an existing connection, close it first
+            websocket.current.close(1000, "Changing game version");
+            // connectWebSocket will be called by useEffect when gameVersion changes
         }
+        setGameVersion(version); // This will trigger the useEffect
+        setIsGameOver(false); // Reset game over state if selecting a new version
     };
 
     const handlePlayAgain = () => {
-        setIsGameOver(false);
+        // This will trigger the cleanup in useEffect, then re-trigger connection
+        // by setting gameVersion to null then back to a (potentially new) version.
+        // Or, simply allow selecting a version again.
+        const currentVersion = gameVersion;
+        setGameVersion(null); // Trigger cleanup
         updateMessage("Select game version to start.");
-        setGameVersion(null); // Resets UI and triggers cleanup effect
-        setGameState(null);
-        setVideoSrc('');
-        setTransformedVideoSrc('');
-        setShowError(null);
+        // If you want to immediately restart the same version, uncomment below:
+        // setTimeout(() => {
+        //     setGameVersion(currentVersion);
+        // }, 100);
     };
 
-    // Card Rendering Logic
     const renderCardContent = (cardIndex) => {
-        const cardState = gameState?.card_states?.[cardIndex] ?? null;
+        const cardState = gameState?.card_states?.[cardIndex] ?? {};
         const isCurrentlyFlipped = gameState?.current_flipped?.includes(cardIndex);
         const isMatched = cardState?.isMatched;
-        // Determine if the card should appear face-up
-        const showFace = isCurrentlyFlipped || (cardState?.isFlippedBefore && !isMatched); // Show if active or previously flipped (and not matched)
+
+        // Card is considered "face up" if it's currently selected by the arm (in current_flipped)
+        // OR if it has been flipped before AND is not yet matched.
+        // This allows showing previously seen cards if the game logic requires it.
+        // For this memory game, usually, only current_flipped and matched are primary visual drivers.
+        // The backend's game_state (card_states.isFlippedBefore) dictates memory.
+        const showFaceUp = isCurrentlyFlipped || (cardState.isFlippedBefore && !isMatched);
 
         let cardFaceContent = null;
-        let cardFaceBgStyle = {backgroundColor: colorMap.default_flipped}; // Default face bg
+        let cardFaceBgStyle = { backgroundColor: colorMap.default_flipped };
 
-        if (showFace) {
-            let colorKey = null;
+        if (showFaceUp) {
+            let itemKey = null; // Used to look up color or image
+            let itemDisplayName = "";
 
-            if (gameVersion === 'yolo' && cardState?.object) {
-                // For YOLO, use images instead of text
-                const objectName = cardState.object.toLowerCase();
-                colorKey = objectName;
-
-                // Handle special cases with spaces in filename
-                const imageName = objectName.replace(' ', '_');
-
-                cardFaceContent = (<div
-                        className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg text-center p-1 backface-hidden"
-                        style={{backgroundColor: 'white', transform: 'rotateY(180deg)'}}
-                    >
-                        <img
-                            src={`/images/${imageName}.png`}
-                            alt={objectName}
-                            className="max-h-[80%] max-w-[80%] object-contain"
-                        />
-                    </div>);
-            } else if (gameVersion === 'color' && cardState?.color) {
-                // For color, just display the color without text
-                colorKey = cardState.color.toLowerCase();
-
-                if (colorKey && colorMap[colorKey]) {
-                    cardFaceBgStyle = {backgroundColor: colorMap[colorKey]};
+            if (gameVersion === 'yolo' && cardState.object) {
+                itemKey = cardState.object.toLowerCase();
+                itemDisplayName = cardState.object;
+                 if (itemKey === DETECTION_PERMANENT_FAIL_STATE.toLowerCase() || itemKey === 'detect_fail') {
+                    itemKey = 'detect_fail'; // Normalize for colorMap
+                    itemDisplayName = "Detection Failed";
                 }
 
-                cardFaceContent = (<div
-                        className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg backface-hidden"
-                        style={{...cardFaceBgStyle, transform: 'rotateY(180deg)'}}
-                    >
-                        {/* No text content for color cards */}
-                    </div>);
-            } else if (cardState?.isFlippedBefore) {
-                // Error state remains the same
-                colorKey = 'detect_fail';
-
-                cardFaceBgStyle = {backgroundColor: colorMap[colorKey]};
-
-                cardFaceContent = (<div
+                if (colorMap[itemKey]) { // Use color as fallback BG if image fails or for non-image items
+                    cardFaceBgStyle = { backgroundColor: colorMap[itemKey] };
+                }
+                
+                const imageName = itemKey.replace(/ /g, '_'); // Replace spaces for filenames
+                cardFaceContent = (
+                    <div
                         className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg text-center p-1 backface-hidden"
-                        style={{...cardFaceBgStyle, transform: 'rotateY(180deg)'}}
+                        style={{ backgroundColor: 'white', transform: 'rotateY(180deg)' }} // White BG for images
                     >
-                        <span className="text-xs sm:text-sm md:text-base font-semibold text-gray-800 break-words">
-                            Error
+                        {itemKey === 'detect_fail' ? (
+                            <span className="text-xs sm:text-sm md:text-base font-semibold text-gray-700 break-words p-1">
+                                {itemDisplayName}
+                            </span>
+                        ) : (
+                            <img
+                                src={`/images/${imageName}.png`}
+                                alt={itemDisplayName}
+                                className="max-h-[75%] max-w-[75%] object-contain"
+                                onError={(e) => { e.target.style.display = 'none'; /* Hide if image fails to load */ }}
+                            />
+                        )}
+                    </div>
+                );
+            } else if (gameVersion === 'color' && cardState.color) {
+                itemKey = cardState.color.toLowerCase();
+                itemDisplayName = cardState.color;
+                if (itemKey === DETECTION_PERMANENT_FAIL_STATE.toLowerCase() || itemKey === 'detect_fail') {
+                    itemKey = 'detect_fail';
+                    itemDisplayName = "Detection Failed";
+                } else if (itemKey === 'black') {
+                    itemDisplayName = "Card Back"; // Or leave empty
+                }
+
+
+                if (colorMap[itemKey]) {
+                    cardFaceBgStyle = { backgroundColor: colorMap[itemKey] };
+                }
+                cardFaceContent = (
+                    <div
+                        className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg backface-hidden"
+                        style={{ ...cardFaceBgStyle, transform: 'rotateY(180deg)' }}
+                    >
+                        {itemKey === 'detect_fail' && (
+                             <span className="text-xs sm:text-sm md:text-base font-semibold text-white break-words p-1">
+                                {itemDisplayName}
+                            </span>
+                        )}
+                        {/* For color cards, usually no text, just the background color. */}
+                    </div>
+                );
+            } else if (cardState.isFlippedBefore) { // Fallback if no specific content but was flipped
+                cardFaceBgStyle = { backgroundColor: colorMap.unknown };
+                cardFaceContent = (
+                     <div
+                        className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg text-center p-1 backface-hidden"
+                        style={{ ...cardFaceBgStyle, transform: 'rotateY(180deg)' }}
+                    >
+                        <span className="text-xs sm:text-sm md:text-base font-semibold text-gray-700 break-words">
+                            ?
                         </span>
-                    </div>);
+                    </div>
+                );
             }
         }
 
-        // Card container with transition logic
-        return (<div key={cardIndex} className="perspective w-full aspect-square">
+        return (
+            <div key={cardIndex} className="perspective w-full aspect-square">
                 <div
-                    className={`relative w-full h-full transition-transform duration-700 ease-in-out preserve-3d ${showFace ? 'rotate-y-180' : ''} ${isMatched ? 'opacity-20 scale-95 pointer-events-none' : ''} ${isCurrentlyFlipped ? 'ring-4 ring-yellow-400 ring-offset-2 scale-105 shadow-xl z-10' : 'shadow-md'}`}
+                    className={`relative w-full h-full transition-transform duration-700 ease-in-out preserve-3d rounded-lg
+                                ${showFaceUp ? 'rotate-y-180' : ''}
+                                ${isMatched ? 'opacity-30 scale-90 pointer-events-none' : ''}
+                                ${isCurrentlyFlipped && !isMatched ? 'ring-4 ring-yellow-400 ring-offset-1 scale-105 shadow-2xl z-20' : 'shadow-lg'}
+                              `}
                 >
                     {/* Card Back */}
-                    <div
-                        className="absolute inset-0 w-full h-full bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg flex items-center justify-center backface-hidden card-back-content">
-                        {/* Content is handled by ::before pseudo-element in CSS */}
+                    <div className="absolute inset-0 w-full h-full bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg flex items-center justify-center backface-hidden card-back-pattern">
+                        {/* SVG or complex pattern can go here, or use CSS ::before/::after */}
+                        <span className="text-4xl text-blue-200 opacity-50 font-bold">?</span>
                     </div>
-                    {/* Card Face (conditionally rendered or always present based on complexity) */}
+                    {/* Card Face (rendered if showFaceUp is true and content exists) */}
                     {cardFaceContent}
                 </div>
-            </div>);
+            </div>
+        );
     };
 
 
-    // --- JSX Structure ---
-    return (<div className="min-h-screen bg-gray-100 flex flex-col items-center p-4">
-            <h1 className="text-2xl sm:text-3xl font-bold text-gray-800 mb-4">Memory Puzzle Game</h1>
+    return (
+        <div className="min-h-screen bg-gray-900 text-gray-100 flex flex-col items-center p-2 sm:p-4">
+            <h1 className="text-3xl sm:text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500 mb-4 sm:mb-6">Memory Puzzle Game</h1>
 
-            {/* Status Bar */}
-            <div
-                className="w-full max-w-6xl bg-white text-gray-700 p-3 rounded-lg shadow mb-4 text-xs sm:text-sm flex flex-wrap justify-between items-center gap-x-4 gap-y-1">
+            <div className="w-full max-w-6xl bg-gray-800 text-gray-300 p-3 rounded-lg shadow-xl mb-4 text-xs sm:text-sm flex flex-wrap justify-between items-center gap-x-4 gap-y-2">
                 <span>Status:
-                    <span className={`ml-1 font-semibold ${isConnected ? 'text-green-600' : 'text-red-600'}`}>
+                    <span className={`ml-1 font-semibold ${isConnected ? 'text-green-400' : 'text-red-400'}`}>
                         {isConnected ? 'Connected' : 'Disconnected'}
                     </span>
-                    {isConnected && gameVersion && ` (${gameVersion})`}
+                    {isConnected && gameVersion && ` (${gameVersion.charAt(0).toUpperCase() + gameVersion.slice(1)})`}
                  </span>
-                <span className="text-center flex-grow mx-2 truncate font-medium" title={message}>{message}</span>
-                <span>Pairs Found: {gameState?.pairs_found ?? 0} / {CARD_COUNT / 2}</span>
+                 <span className="text-center flex-grow mx-2 truncate font-medium text-gray-100" title={message}>{message}</span>
+                 <span>Pairs: <strong className="text-yellow-400">{gameState?.pairs_found ?? 0}</strong> / {CARD_COUNT / 2}</span>
             </div>
 
-            {/* Error Display */}
-            {showError && (<div
-                    className="w-full max-w-6xl bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded-md shadow mb-4 text-sm"
-                    role="alert">
+            {showError && (
+                <div className="w-full max-w-6xl bg-red-700 border border-red-500 text-red-100 px-4 py-2 rounded-md shadow-lg mb-4 text-sm" role="alert">
                     <strong className="font-bold">Error: </strong>
                     <span className="block sm:inline">{showError}</span>
-                </div>)}
+                </div>
+            )}
 
-
-            {/* Version Selector / Play Again Buttons */}
-            {(!gameVersion || isGameOver) && (<div className="flex flex-wrap justify-center space-x-4 mb-6">
-                    {!isGameOver ? (<>
+            {(!gameVersion || isGameOver) && (
+                <div className="flex flex-col sm:flex-row items-center justify-center space-y-3 sm:space-y-0 sm:space-x-4 mb-6 p-4 bg-gray-800 rounded-lg shadow-xl">
+                    {!isGameOver ? (
+                         <>
                             <button
                                 onClick={() => handleVersionSelect('yolo')}
-                                disabled={isConnected || !!gameVersion}
-                                className="px-5 py-2 bg-indigo-600 text-white rounded-md shadow hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                                disabled={!!gameVersion && isConnected && !isGameOver}
+                                className="px-6 py-3 text-lg bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-md shadow-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-opacity-75 w-full sm:w-auto"
                             >
-                                Start YOLO
+                                Start YOLO Version
                             </button>
                             <button
                                 onClick={() => handleVersionSelect('color')}
-                                disabled={isConnected || !!gameVersion}
-                                className="px-5 py-2 bg-teal-600 text-white rounded-md shadow hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-teal-400"
+                                disabled={!!gameVersion && isConnected && !isGameOver}
+                                className="px-6 py-3 text-lg bg-gradient-to-r from-teal-500 to-cyan-600 text-white rounded-md shadow-lg hover:from-teal-600 hover:to-cyan-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:ring-opacity-75 w-full sm:w-auto"
                             >
-                                Start Color
+                                Start Color Version
                             </button>
-                        </>) : (<button
+                         </>
+                     ) : (
+                         <button
                             onClick={handlePlayAgain}
-                            className="px-5 py-2 bg-green-600 text-white rounded-md shadow hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-green-400"
-                        >
+                            className="px-8 py-4 text-xl bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-md shadow-xl hover:from-green-600 hover:to-emerald-700 transition-all transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-opacity-75"
+                         >
                             Play Again?
-                        </button>)}
-                </div>)}
+                         </button>
+                    )}
+                </div>
+            )}
 
-            {/* Game Area */}
-            {gameVersion && !isGameOver && isConnected && (
-                <div className="flex flex-col lg:flex-row gap-4 w-full max-w-6xl">
-
-                    {/* Left Column: Feeds */}
-                    <div className="flex flex-col gap-4 lg:w-1/2">
-                        {/* Main Camera Feed */}
-                        <div className="bg-white p-3 sm:p-4 rounded-lg shadow">
-                            <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-700">Live Camera</h2>
-                            <div
-                                className="w-full aspect-video bg-gray-200 border border-gray-300 rounded overflow-hidden">
+            {gameVersion && !isGameOver && ( // Render game area only if version selected and not game over
+                 <div className="flex flex-col lg:flex-row gap-4 sm:gap-6 w-full max-w-6xl">
+                     <div className="flex flex-col gap-4 sm:gap-6 lg:w-1/2">
+                         <div className="bg-gray-800 p-3 sm:p-4 rounded-lg shadow-xl border border-gray-700">
+                             <h2 className="text-xl sm:text-2xl font-semibold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-blue-500">Live Camera</h2>
+                             <div className="w-full aspect-video bg-gray-700 border border-gray-600 rounded overflow-hidden">
                                 {videoSrc ? (
-                                    <img src={videoSrc} alt="Live feed" className="w-full h-full object-cover" />) : (
-                                    <div className="w-full h-full flex items-center justify-center text-gray-500">
-                                        Waiting for camera...
-                                    </div>)}
-                            </div>
-                        </div>
+                                    <img src={videoSrc} alt="Live feed" className="w-full h-full object-cover" />
+                                ) : (
+                                    <div className="w-full h-full flex items-center justify-center text-gray-400">
+                                        {isConnected ? "Waiting for camera..." : "Connecting..."}
+                                    </div>
+                                )}
+                             </div>
+                         </div>
 
-                        {/* Transformed Board Feed */}
-                        <div className="bg-white p-3 sm:p-4 rounded-lg shadow">
-                            <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-700">Detected Board</h2>
-                            <div
-                                className="w-full bg-gray-200 border border-gray-300 rounded overflow-hidden relative"
-                                style={{paddingTop: `${(BOARD_DETECT_HEIGHT / BOARD_DETECT_WIDTH) * 100}%`}} // Maintain aspect ratio
-                            >
-                                {transformedVideoSrc ? (<img src={transformedVideoSrc} alt="Transformed board"
-                                                             className="absolute inset-0 w-full h-full object-contain" /> // Use object-contain
-                                ) : (<div
-                                        className="absolute inset-0 flex items-center justify-center text-gray-500 text-xs p-2 text-center">
-                                        {videoSrc ? 'Waiting for board detection...' : 'Camera feed needed'}
-                                    </div>)}
-                            </div>
-                        </div>
-                    </div>
+                          <div className="bg-gray-800 p-3 sm:p-4 rounded-lg shadow-xl border border-gray-700">
+                             <h2 className="text-xl sm:text-2xl font-semibold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-lime-400 to-green-500">Detected Board</h2>
+                             <div
+                                 className="w-full bg-gray-700 border border-gray-600 rounded overflow-hidden relative"
+                                 // Aspect ratio based on backend's board detection dimensions
+                                 style={{ paddingTop: `${(BOARD_DETECT_HEIGHT / BOARD_DETECT_WIDTH) * 100}%` }}
+                             >
+                                {transformedVideoSrc ? (
+                                    <img src={transformedVideoSrc} alt="Transformed board" className="absolute inset-0 w-full h-full object-contain" />
+                                ) : (
+                                    <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-xs p-2 text-center">
+                                        {videoSrc && isConnected ? 'Waiting for board detection...' : (isConnected ? 'Camera feed needed' : 'Connecting...')}
+                                    </div>
+                                )}
+                             </div>
+                         </div>
+                     </div>
 
-                    {/* Right Column: Game Board */}
-                    <div className="bg-white p-3 sm:p-4 rounded-lg shadow lg:w-1/2">
-                        <h2 className="text-lg sm:text-xl font-semibold mb-3 text-gray-700">Game Board</h2>
-                        {/* Game Grid */}
-                        <div className={`grid grid-cols-${GRID_COLS} gap-2 md:gap-3 lg:gap-4`}>
-                            {Array.from({length: CARD_COUNT}).map((_, index) => renderCardContent(index))}
-                        </div>
-                    </div>
-                </div>)}
+                     <div className="bg-gray-800 p-3 sm:p-4 rounded-lg shadow-xl border border-gray-700 lg:w-1/2">
+                         <h2 className="text-xl sm:text-2xl font-semibold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500">Game Board</h2>
+                         <div className={`grid grid-cols-${GRID_COLS} gap-2 sm:gap-3 lg:gap-4`}>
+                             {Array.from({ length: CARD_COUNT }).map((_, index) => renderCardContent(index) )}
+                         </div>
+                     </div>
+                 </div>
+            )}
 
-            {/* Placeholder when not connected or version not selected */}
-            {(!gameVersion || !isConnected) && !isGameOver && (<div className="mt-10 text-gray-500">
-                    Please select a game version to begin.
-                </div>)}
-
-        </div>);
+             {(!gameVersion || (!isConnected && !isGameOver)) && ( // Show this only if no game version or disconnected (and not already game over)
+                 <div className="mt-10 text-gray-500 text-lg">
+                     Please select a game version to begin.
+                 </div>
+             )}
+        </div>
+    );
 }
 
-// Add utility classes for Tailwind JIT (if needed, or rely on safelist in config)
-// These are for the 3D flip effect
-const _perspective = 'perspective'; // Define these strings to potentially help JIT
-const _preserve3d = 'preserve-3d';
-const _rotateY180 = 'rotate-y-180';
-const _backfaceHidden = 'backface-hidden';
+// For Tailwind JIT, ensure these classes are discoverable or safelisted in tailwind.config.js
+// if GRID_COLS is dynamic or not a standard Tailwind number:
+// e.g. for GRID_COLS = 4, 'grid-cols-4' is standard.
+// The 3D flip animation classes:
+const _dynamicTailwindClasses = 'perspective preserve-3d rotate-y-180 backface-hidden';
