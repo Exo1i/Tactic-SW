@@ -1,305 +1,310 @@
 import cv2
 import numpy as np
-from ultralytics import YOLO
-import threading
-import serial  # <-- Added for Arduino serial communication
-import time
-import math
-import webcolors
-from scipy.spatial import KDTree
+import json
+import os
+from collections import defaultdict
 
-# Set prediction confidence threshold (adjust as needed)
-CONF_THRESHOLD = 0.5
+class ColorDetector:
+    def __init__(self, game_config_file="game_color_ranges.json"):
+        self.game_config_file = game_config_file
 
-# Depth estimation parameters
-FOCAL_LENGTH = 550  # in pixels (adjust based on your camera)
-BALLOON_WIDTH = 0.15  # in meters (e.g., 30 cm, adjust based on your balloon size)
+        # Default color ranges in HSV
+        self.default_color_ranges = {
+            "red": [
+                {"lower": np.array([0, 100, 100]), "upper": np.array([10, 255, 255])},
+                {"lower": np.array([160, 100, 100]), "upper": np.array([180, 255, 255])}
+            ],
+            "purple": [
+                {"lower": np.array([125, 40, 80]), "upper": np.array([155, 255, 255])}
+            ],
+            "cyan": [
+                {"lower": np.array([85, 100, 100]), "upper": np.array([105, 255, 255])}
+            ],
+            "lime_green": [
+                {"lower": np.array([35, 100, 100]), "upper": np.array([55, 255, 255])}
+            ]
+        }
 
-TARGET_COLOR = "red"    # Target color wanted
+        # Initialize with default ranges for normal mode
+        self.color_ranges = {color: list(ranges) for color, ranges in self.default_color_ranges.items()}
 
-IMAGE_WIDTH = 640 
-IMAGE_HEIGHT = 480
+        # Game mode ranges (starts empty)
+        self.game_color_ranges = {}
 
-X_CAMERA_FOV = 86  
-# in degrees
-Y_CAMERA_FOV = 53  # in degrees
+        # Load any saved configurations
+        self.load_game_config()
 
-LASER_OFFSET_CM_X = 5
-LASER_OFFSET_CM_Y = 7
+        # Color display values (B,G,R)
+        self.color_display = {
+            "red": (0, 0, 255),
+            "purple": (128, 0, 128),
+            "cyan": (255, 255, 0),
+            "lime_green": (50, 255, 50)
+        }
 
-depth = 150;
+        # For collecting training data
+        self.training_data = defaultdict(list)
+        self.training_mode = False
+        self.current_training_color = None
 
-shot_balloons = []  # Stores (x, y) tuples of previously shot balloons
+        # Game mode flag
+        self.game_mode = False
 
-# Check if balloon is already shot before
-def is_balloon_already_shot(center_x, center_y, threshold=50):
-    for shot_x, shot_y in shot_balloons:    
-        distance = math.sqrt((center_x - shot_x) ** 2 + (center_y - shot_y) ** 2)
-        if distance < threshold:
-            return True
-    return False
+    def load_game_config(self):
+        """Load game mode color ranges from game configuration file"""
+        if os.path.exists(self.game_config_file):
+            try:
+                with open(self.game_config_file, 'r') as f:
+                    loaded_ranges = json.load(f)
 
-def send_to_arduino(arduino, pan_angle, tilt_angle, timeout=50000):
-    if arduino is None:
-        print("Arduino not connected.")
-        return False
-    try:
-        # Send data
-        data_str = f"{pan_angle},{tilt_angle}\n"
-        print(f"Sending to Arduino: {data_str.strip()}")
-        arduino.write(data_str.encode('utf-8'))
-        time.sleep(0.05)  # Allow Arduino to respond
+                self.game_color_ranges = {}
+                for color, ranges in loaded_ranges.items():
+                    self.game_color_ranges[color] = []
+                    for range_data in ranges:
+                        lower = np.array(range_data["lower"])
+                        upper = np.array(range_data["upper"])
+                        self.game_color_ranges[color].append({"lower": lower, "upper": upper})
 
-        
-        # Wait for acknowledgment
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if arduino.in_waiting:
-                line = arduino.readline().decode('utf-8').strip()
-                print("Arduino says:", line)
-                if line == "ACK":
-                    return True
-            time.sleep(0.01)  # Small sleep to prevent CPU overuse
-        print("Timeout waiting for Arduino acknowledgment.")
-        return False
-    except Exception as e:
-        print(f"Serial communication error: {e}")
-        return False
+                print(f"Loaded game color configurations from {self.game_config_file}")
+            except Exception as e:
+                print(f"Error loading game config file: {e}")
+                print("Starting with empty game colors")
 
-# Function to calculate pan servo angle
-def calculate_pan_angle(target_x, image_width, cam_fov):
-    center_x = image_width / 2
-    fov_rad = math.radians(X_CAMERA_FOV)
-    width_at_target = 2 * depth * math.tan(fov_rad / 2)  # cm
-    pixels_per_cm_x = image_width / width_at_target
-    laser_camera_offset_pixels_x = LASER_OFFSET_CM_X * pixels_per_cm_x
-    target_x += laser_camera_offset_pixels_x
-    angle = 90 - ((target_x - center_x) / image_width) * cam_fov
-    angle = round(angle)
-    angle = max(0, min(180, angle))
-    return angle
+    def save_game_config(self):
+        """Save game mode color ranges to game configuration file"""
+        serializable_ranges = {}
+        for color, ranges in self.game_color_ranges.items():
+            serializable_ranges[color] = []
+            for range_data in ranges:
+                serializable_ranges[color].append({
+                    "lower": range_data["lower"].tolist(),
+                    "upper": range_data["upper"].tolist()
+                })
 
-# Function to calculate tilt servo angle
-def calculate_tilt_angle(target_y, image_height, cam_fov):
-    center_y = image_height / 2
-    fov_rad_y = math.radians(Y_CAMERA_FOV)  # Vertical FOV in radians
-    height_at_target = 2 * depth * math.tan(fov_rad_y / 2)  # Height in cm at target distance
-    pixels_per_cm_y = image_height / height_at_target  # Pixels per cm in vertical direction
-    laser_camera_offset_pixels_y = LASER_OFFSET_CM_Y * pixels_per_cm_y  # Vertical laser offset in pixels
-    target_y += laser_camera_offset_pixels_y
-    angle = 90 + ((target_y - center_y) / image_height) * cam_fov
-    # angle = round(angle)
-    # angle = max(0, min(180, angle))
-    return angle
+        with open(self.game_config_file, 'w') as f:
+            json.dump(serializable_ranges, f, indent=4)
+        print(f"Saved game color configurations to {self.game_config_file}")
 
-# def closest_color(requested_color):
-#     min_colors = {}
-#     for hex_key, name in webcolors.CSS3_HEX_TO_NAMES.items():  # Use .items() to get hex and name
-#         r_c, g_c, b_c = webcolors.hex_to_rgb(hex_key)
-#         rd = (r_c - requested_color[0]) ** 2
-#         gd = (g_c - requested_color[1]) ** 2
-#         bd = (b_c - requested_color[2]) ** 2
-#         min_colors[rd + gd + bd] = name
-#     return min_colors[min(min_colors.keys())]
+    def detect_colors(self, frame):
+        """Detect configured colors in the frame"""
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        results = {}
 
-# def get_color_name(rgb_tuple):
-#     # Convert list to tuple if necessary
-#     if isinstance(rgb_tuple, list):
-#         rgb_tuple = tuple(rgb_tuple)
-    
-#     # Validate input
-#     if not isinstance(rgb_tuple, tuple) or len(rgb_tuple) != 3:
-#         raise ValueError("Input must be a tuple or list of 3 integers [R, G, B]")
-#     if not all(isinstance(x, int) and 0 <= x <= 255 for x in rgb_tuple):
-#         raise ValueError("RGB values must be integers between 0 and 255")
-    
-#     try:
-#         # Try exact match using rgb_to_name
-#         return webcolors.rgb_to_name(rgb_tuple, spec='css3')
-#     except ValueError:
-#         # Fallback to closest color
-#         return closest_color(rgb_tuple)
+        # Use game mode ranges if in game mode, otherwise use normal mode ranges
+        color_ranges = self.game_color_ranges if self.game_mode else self.color_ranges
 
-# Helper function to determine a basic color name from BGR values
-def get_color_name(bgr):
-    # Convert BGR to RGB for easier interpretation
-    r, g, b = bgr[2], bgr[1], bgr[0]
-    # Simple heuristic to determine the color name
-    if r > 150 and g > 70 and g<120 and b > 70 and b<120:
-        return "red"
-    elif r > 140 and g > 150 and b < 150 and b<200:
-        return "green"
-    elif r < 100 and g < 160 and b > 170:
-        return "blue"
-    elif r > 160 and g > 140 and  b < 100:
-        return "yellow"
-    elif r < 50 and g < 50 and b < 50:
-        return "black"
-    elif r > 200 and g > 200 and b > 200:
-        return "white"
-    else:
-        # Return the RGB tuple if no basic color is matched
-        return f"rgb({int(r)}, {int(g)}, {int(b)})"
+        for color_name, ranges in color_ranges.items():
+            mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+            for range_data in ranges:
+                lower = range_data["lower"]
+                upper = range_data["upper"]
+                current_mask = cv2.inRange(hsv, lower, upper)
+                mask = cv2.bitwise_or(mask, current_mask)
 
-# Load your trained YOLO model (assumed to detect balloons)
-model = YOLO(r'TargetDetection\\runs\detect\\train\weights\best.pt')
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 100]  # Reduced threshold
 
-# --- Arduino Serial Setup ---
-# Change 'COM3' to your Arduino's port (check Arduino IDE > Tools > Port)
-try:
-    arduino = serial.Serial('COM4', 9600, timeout=1)
-    time.sleep(2)  # Wait for the connection to establish
-    print("Arduino connected successfully.")
-except Exception as e:
-    print(f"Could not open serial port: {e}")
-    arduino = None
+            if contours:
+                if self.game_mode:
+                    # ✅ Return immediately if in game mode and a match is found
+                    return {color_name: contours}
+                else:
+                    results[color_name] = contours
 
-class VideoStream:
-    def __init__(self, src):
-        self.cap = cv2.VideoCapture(src)
-        self.ret, self.frame = self.cap.read()
-        self.stopped = False
-        self.lock = threading.Lock()
-        self.thread = threading.Thread(target=self.update, daemon=True)
-        self.thread.start()
+        return results
 
-    def update(self):
-        while not self.stopped:
-            ret, frame = self.cap.read()
-            with self.lock:
-                self.ret = ret
-                self.frame = frame
+    def start_training(self, color_name):
+        """Start training mode for a specific color"""
+        if color_name not in self.default_color_ranges:
+            print(f"Color {color_name} not in supported colors")
+            return False
 
-    def read(self):
-        with self.lock:
-            return self.ret, self.frame.copy() if self.frame is not None else (False, None)
+        self.training_mode = True
+        self.current_training_color = color_name
+        self.training_data[color_name] = []
 
-    def release(self):
-        self.stopped = True
-        self.thread.join()
-        self.cap.release()
+        print(f"Training mode activated for {color_name}")
+        print("Place the object with target color in frame and press 'S' to sample")
+        print("Press 'F' to finish training")
+        return True
 
-# Open the IP camera stream using the threaded VideoStream
-ip_camera_url = 'http://192.168.55.215:4747/video'  # Example for IP Webcam app
-cap = VideoStream(ip_camera_url)
+    def add_training_sample(self, frame, error_margin=(30, 80, 80)):
+        """Add a training sample for the current color with valid HSV ranges"""
+        if not self.training_mode or not self.current_training_color:
+            return False
 
-while True:
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        break
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        h, w = hsv.shape[:2]
 
-    # Run inference on the current frame
-    results = model.predict(source=frame, show=False)  # show=False so we can control our display
+        # Use a 40x40 central area of the frame
+        sample_area = hsv[h//2-20:h//2+20, w//2-20:w//2+20]
 
-    # List to store detected balloon info for display
-    balloons_info = []
+        # Get min/max HSV values
+        min_val = np.min(sample_area, axis=(0, 1)).astype(int)
+        max_val = np.max(sample_area, axis=(0, 1)).astype(int)
 
-    # Process each result (if multiple are returned)
-    for result in results:
-        # Skip if there are no detected boxes
-        if result.boxes is None or len(result.boxes) == 0:
-            continue
+        # Expand range with error margin
+        min_val[0] = max(0, min_val[0] - error_margin[0])      # H
+        max_val[0] = min(179, max_val[0] + error_margin[0])    # H
+        min_val[1] = max(0, min_val[1] - error_margin[1])      # S
+        max_val[1] = min(255, max_val[1] + error_margin[1])    # S
+        min_val[2] = max(0, min_val[2] - error_margin[2])      # V
+        max_val[2] = min(255, max_val[2] + error_margin[2])    # V
 
-        # Convert bounding box, class and confidence values to numpy arrays
-        boxes = result.boxes.xyxy.cpu().numpy()  # Bounding box coordinates: [x1, y1, x2, y2]
-        cls_ids = result.boxes.cls.cpu().numpy()   # Class indices
-        confs = result.boxes.conf.cpu().numpy()      # Confidence scores
+        # Handle hue wraparound (like for red)
+        if min_val[0] > max_val[0]:
+            # Split into two ranges: one from min to 179, another from 0 to max
+            range1 = {
+                "lower": np.array([min_val[0], min_val[1], min_val[2]]),
+                "upper": np.array([179,       max_val[1], max_val[2]])
+            }
+            range2 = {
+                "lower": np.array([0,         min_val[1], min_val[2]]),
+                "upper": np.array([max_val[0], max_val[1], max_val[2]])
+            }
+            self.training_data[self.current_training_color].extend([range1, range2])
+            print("Added split hue range for wraparound:")
+            print(f"  Range 1: {range1}")
+            print(f"  Range 2: {range2}")
+        else:
+            new_range = {
+                "lower": np.array(min_val),
+                "upper": np.array(max_val)
+            }
+            self.training_data[self.current_training_color].append(new_range)
+            print(f"Added single HSV range: {new_range}")
 
-        # Loop through each detected obj
-        # ect
-        for i, box in enumerate(boxes):
-            # Apply confidence threshold filter
-            if confs[i] < CONF_THRESHOLD:
-                continue
+        return True
 
-            # Get label name (ensure your model's class names include 'balloon')
-            label = model.names[int(cls_ids[i])]
-            # Only process detections labeled as 'balloon'
-            if label.lower() != 'balloon':
-                continue
+    def finish_training(self):
+        """Complete training and update the color ranges"""
+        if not self.training_mode or not self.current_training_color:
+            return False
 
-            # Convert bounding box coordinates to integers
-            x1, y1, x2, y2 = box.astype(int)
+        if not self.training_data[self.current_training_color]:
+            print("No samples were collected. Training cancelled.")
+            self.training_mode = False
+            self.current_training_color = None
+            return False
 
-            # Calculate the center (x, y) of the bounding box
-            center_x = (x1 + x2) // 2
-            center_y = (y1 + y2) // 2
+        # In game mode, update game color ranges
+        if self.current_training_color not in self.game_color_ranges:
+            self.game_color_ranges[self.current_training_color] = []
 
-              # Calculate pixel width of the balloon
-            pixel_width = x2 - x1
+        for new_range in self.training_data[self.current_training_color]:
+            self.game_color_ranges[self.current_training_color].append(new_range)
 
-            # Estimate depth: Z = (f * W) / w
-            depth = (FOCAL_LENGTH * BALLOON_WIDTH) / pixel_width if pixel_width > 0 else 0.0
-            depth *= 100
+        self.save_game_config()
+        print(f"Added {len(self.training_data[self.current_training_color])} ranges to game color {self.current_training_color}")
 
-            # Extract the region of interest (ROI) from the frame
-            roi = frame[y1:y2, x1:x2]
-            # Skip if ROI is empty (could happen due to bounding box issues)
-            if roi.size == 0:
-                continue
+        self.training_mode = False
+        self.current_training_color = None
+        return True
 
-            # Compute the average BGR color in the ROI
-            mean_color = [int(round(x)) for x in cv2.mean(roi)[:3]]  # Round floats to integers            # Determine a basic color name from the average color
-            print(mean_color)
-            color_name = get_color_name(mean_color)
+    def toggle_game_mode(self):
+        """Toggle between regular mode and game mode"""
+        self.game_mode = not self.game_mode
+        mode_name = "Game Mode" if self.game_mode else "Normal Mode"
+        print(f"Switched to {mode_name}")
+        return self.game_mode
 
-            print(color_name)
+    def draw_results(self, frame, results):
+        """Draw detection results on the frame"""
+        result_frame = frame.copy()
+        h, w = result_frame.shape[:2]
 
-            if color_name != TARGET_COLOR:
-                continue
-            
-            # if is_balloon_already_shot(center_x, center_y):
-            #     print(f"Skipping balloon at ({center_x}, {center_y}): Already shot.")
-            #     continue
+        # Draw training indicator if in training mode
+        if self.training_mode:
+            # Draw training sampling square
+            cv2.rectangle(result_frame, (w//2-10, h//2-10), (w//2+10, h//2+10), (255, 102, 204), 2)
+            mode_text = f"Training: {self.current_training_color}"
+            cv2.putText(result_frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            shot_balloons.append((center_x, center_y))    # Should be add when arduino acknowledge shooting
-            print("Shoot it!")
+        # Draw game mode indicator
+        elif self.game_mode:
+            mode_text = "GAME MODE"
+            cv2.putText(result_frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
-            pan_angle = calculate_pan_angle(center_x,IMAGE_WIDTH,X_CAMERA_FOV)
-            tilt_angle = calculate_tilt_angle(center_y,IMAGE_HEIGHT,Y_CAMERA_FOV)
+        # Draw detected colors
+        for color_name, contours in results.items():
+            if color_name in self.color_display:
+                display_color = self.color_display[color_name]
+            else:
+                # Generate color for unknown color names
+                color_hash = hash(color_name) % 0xFFFFFF
+                b = color_hash & 0xFF
+                g = (color_hash >> 8) & 0xFF
+                r = (color_hash >> 16) & 0xFF
+                display_color = (b, g, r)
+                self.color_display[color_name] = display_color
 
-            info_text = f"{label} Depth: {depth:.2f}m ({color_name}) {confs[i]:.2f} Pos: ({center_x}, {center_y})"
-            balloons_info.append({'box': (x1, y1, x2, y2),
-                                   'color': color_name,
-                                   'conf': confs[i],
-                                   'pos': (center_x, center_y),
-                                   'depth': depth})
-            
-            print(info_text)
-            
-            # Draw the bounding box on the frame
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            # Put the text label above the bounding box
-            cv2.putText(frame, info_text, (x1, y1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            for contour in contours:
+                cv2.drawContours(result_frame, [contour], -1, display_color, 2)
+                x, y, w, h = cv2.boundingRect(contour)
+                cv2.rectangle(result_frame, (x, y), (x+w, y+h), display_color, 2)
+                cv2.putText(result_frame, color_name, (x, y-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, display_color, 2)
 
+        return result_frame
 
-            # --- Send data to Arduino ---
-            send_to_arduino(arduino,pan_angle,tilt_angle,50000)
+def connect_to_droidcam():
+    """Connect to DroidCam using WiFi IP and port"""
+    ip = input("Enter the DroidCam IP address (e.g., 192.168.1.101): ")
+    port = input("Enter the DroidCam port (e.g., 4747): ")
+    camera_url = f"http://{ip}:{port}/video"
+    print(f"Connecting to DroidCam at {camera_url}")
+    cap = cv2.VideoCapture(camera_url)
 
-            # Prepare text info including label, color, confidence, and position
+    if not cap.isOpened():
+        print("Failed to connect to DroidCam. Please check the IP and port.")
+        return None
 
-    # Optionally, display a summary of all detected balloons on the frame
-    summary_text = "Detected Balloons: " + ", ".join(
-        [f"{info['color']} {info['pos']} ({info['conf']:.2f}, {info.get('depth', 0.0):.2f}m)" for info in balloons_info])
-    cv2.putText(frame, summary_text, (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+    return cap
 
-    # Show the final frame with overlays
-    cv2.imshow('YOLO Balloon Detection', frame)
+def main():
+    """Main function to run the color detection application"""
+    detector = ColorDetector()
+    cap = connect_to_droidcam()
 
-    # Exit the loop on pressing 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    if cap is None:
+        print("Exiting due to camera connection failure")
+        return
 
-cap.release()
-cv2.destroyAllWindows()
-if arduino is not None:
-    arduino.close()
+    print("\nControls:")
+    print("1-4: Start training for red, purple, cyan, lime_green")
+    print("S: Sample color in training mode")
+    print("F: Finish training")
+    print("G: Toggle game mode")
+    print("Q: Quit")
 
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to capture frame")
+            break
 
+        results = detector.detect_colors(frame)  # This now works correctly
+        result_frame = detector.draw_results(frame, results)
+        cv2.imshow("Color Detection", result_frame)
 
-#Ballon rectangle: make it circular(not imortant )
-#Resolution
-#Shoot on red color 
-#
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('q'):
+            break
+        elif key in [ord('1'), ord('2'), ord('3'), ord('4')]:
+            color_map = {ord('1'): "red", ord('2'): "purple", ord('3'): "cyan", ord('4'): "lime_green"}
+            detector.start_training(color_map[key])
+        elif key == ord('s'):
+            if detector.training_mode:
+                detector.add_training_sample(frame)
+        elif key == ord('f'):
+            if detector.training_mode:
+                detector.finish_training()
+        elif key == ord('g'):
+            detector.toggle_game_mode()
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()

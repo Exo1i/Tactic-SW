@@ -13,3 +13,4 @@ pyserial
 kociemba
 scipy
 webcolors
+ultralytics

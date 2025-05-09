@@ -1,5 +1,4 @@
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import importlib
@@ -12,6 +11,9 @@ import serial # Added for serial connection
 # Import memory matching backend for color/yolo WebSocket endpoints
 from games.memory_matching_backend import MemoryMatching
 from games.rubiks_cube_game import RubiksCubeGame
+from fastapi.responses import StreamingResponse
+from games.target_shooter_game import GameSession  # Import GameSession for streaming
+
 
 app = FastAPI()
 
@@ -154,6 +156,57 @@ GAME_MODULES = {
     "color": "games.memory_matching_backend", # Points to the module
     "yolo": "games.memory_matching_backend",  # Points to the module
 }
+
+# --- Global singleton for Target Shooter session (for demo/dev only) ---
+target_shooter_session = None
+
+@app.websocket("/ws/target-shooter")
+async def websocket_target_shooter(websocket: WebSocket):
+    global target_shooter_session
+    await websocket.accept()
+    game_launch_config = {
+        "serial_instance": serial_connection_instance,
+        "webcam_ip": app_settings["webcam_ip"],
+        "model_path": "games/TargetDetection/runs/detect/train/weights/best.pt"
+    }
+    first_message_data = await websocket.receive()
+    client_initial_command_data = None
+    if "text" in first_message_data:
+        try:
+            parsed_text = json.loads(first_message_data["text"])
+            if isinstance(parsed_text, dict):
+                client_initial_command_data = parsed_text
+                game_launch_config.update(client_initial_command_data)
+        except Exception as e:
+            await websocket.send_json({"status": "error", "message": f"Invalid initial JSON config: {str(e)}"})
+            await websocket.close(); return
+    else:
+        await websocket.send_json({"status": "error", "message": "Expected initial JSON config as text."})
+        await websocket.close(); return
+
+    try:
+        target_shooter_session = GameSession(game_launch_config)
+    except Exception as e:
+        await websocket.send_json({"status": "error", "message": f"Error initializing game session: {str(e)}"})
+        await websocket.close(); return
+
+    if client_initial_command_data and client_initial_command_data.get("action") == "initial_config":
+        target_shooter_session.process_command(client_initial_command_data)
+
+    await target_shooter_session.manage_game_loop(websocket)
+    # When manage_game_loop returns, session is stopped
+
+@app.get("/stream/target-shooter")
+async def stream_target_shooter(request: Request):
+    global target_shooter_session
+    if not target_shooter_session:
+        # Optionally, you could auto-create a session here, but better to require WS first
+        return StreamingResponse(
+            iter([b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"]),  # empty stream
+            media_type="multipart/x-mixed-replace; boundary=frame"
+        )
+    generator = target_shooter_session.get_stream_generator()
+    return StreamingResponse(generator, media_type="multipart/x-mixed-replace; boundary=frame")
 
 @app.websocket("/ws/{game_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str):
@@ -350,6 +403,12 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 except Exception as e: print(f"Error calling cleanup in finally for {game_id}: {e}")
 
 
+@app.get("/stream/target-shooter")
+async def stream_target_shooter(request: Request):
+    # Get the GameSession instance for this user/session
+    session = ... # however you manage sessions
+    generator = session.get_stream_generator()
+    return StreamingResponse(generator, media_type="multipart/x-mixed-replace; boundary=frame")
 # Helper to support both sync and async process_frame/process_command
 async def maybe_await(func, *args, **kwargs):
     res = func(*args, **kwargs)
@@ -358,4 +417,4 @@ async def maybe_await(func, *args, **kwargs):
     return res
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000,reload=True)

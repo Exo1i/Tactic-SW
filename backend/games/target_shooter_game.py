@@ -8,7 +8,8 @@ import os
 import threading
 import asyncio
 import json # Added for process_command if it receives JSON strings
-from starlette.websockets import WebSocketState # For checking websocket state
+from starlette.websockets import WebSocketState, WebSocketDisconnect # For checking websocket state and handling disconnections
+import queue # Add for frame streaming
 
 # --- Default Constants ---
 CONF_THRESHOLD_DEFAULT = 0.7
@@ -30,7 +31,7 @@ INIT_TILT = 90
 MOVEMENT_COOLDOWN = 0.2
 NO_BALLOON_TIMEOUT = 10
 RETURN_TO_CENTER_DELAY = 1.0
-CAPTURE_FPS_TARGET = 10 # Target FPS for camera capture loop
+CAPTURE_FPS_TARGET = 30 # Target FPS for camera capture loop
 
 class GameSession:
     def __init__(self, config):
@@ -63,7 +64,6 @@ class GameSession:
         self.balloon_width = float(config.get("balloon_width", BALLOON_WIDTH_DEFAULT))
         self.no_balloon_timeout_setting = float(config.get("no_balloon_timeout", NO_BALLOON_TIMEOUT))
 
-
         # Game state variables
         self.current_pan = INIT_PAN
         self.current_tilt = INIT_TILT
@@ -79,6 +79,7 @@ class GameSession:
         self.capture_thread = None
         self.stop_event = threading.Event()
         self._async_loop = None # To store the asyncio loop for threadsafe calls
+        self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
 
         # Initial Arduino homing is done here, assuming serial is ready
         if self.arduino:
@@ -90,10 +91,6 @@ class GameSession:
     async def manage_game_loop(self, websocket):
         self.websocket = websocket
         self._async_loop = asyncio.get_running_loop() # Get the loop uvicorn is running on
-
-        # The first message from client is expected to be initial_config
-        # This is handled by main.py before calling manage_game_loop
-        # process_command would have been called with initial_config already.
 
         self.stop_event.clear()
         self.game_requested_stop = False # Reset for new game session
@@ -139,7 +136,6 @@ class GameSession:
             print("TargetShooter: manage_game_loop ending. Stopping resources.")
             self.stop()
 
-
     def _capture_and_process_task(self):
         print(f"TargetShooter: Attempting to open camera: {self.webcam_ip}")
         cap = cv2.VideoCapture(self.webcam_ip)
@@ -154,7 +150,7 @@ class GameSession:
             return
 
         print(f"TargetShooter: Camera {self.webcam_ip} opened successfully.")
-        frame_delay = 1.0 / CAPTURE_FPS_TARGET
+        frame_delay = 1.0 / 1000
 
         while not self.stop_event.is_set():
             loop_start_time = time.time()
@@ -171,37 +167,67 @@ class GameSession:
                         break
                     continue
 
-                # Process the frame (this is the core logic)
-                # _process_single_frame_logic now directly uses self.game_requested_stop etc.
                 response_data = self._process_single_frame_logic(frame)
 
+                # --- STREAM: Put processed frame in queue for HTTP streaming ---
+                if response_data.get("processed_frame"):
+                    try:
+                        # Only keep the latest frame, drop old if queue is full
+                        if self.frame_queue.full():
+                            try:
+                                self.frame_queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                        self.frame_queue.put_nowait(response_data["processed_frame"])
+                    except Exception as qerr:
+                        print(f"Frame queue error: {qerr}")
+
+                # --- WEBSOCKET: Send JSON as before ---
                 if self.websocket and self.websocket.client_state == WebSocketState.CONNECTED and self._async_loop:
                     asyncio.run_coroutine_threadsafe(self.websocket.send_json(response_data), self._async_loop)
                 
-                # If game ends due to internal logic (timeout, all balloons shot)
                 if response_data.get("status") == "ended" or self.game_over_due_to_timeout or self.game_requested_stop:
                     print("TargetShooter: Game ended based on frame processing. Stopping capture task.")
-                    self.stop_event.set() # Signal manage_game_loop and this loop to stop
+                    self.stop_event.set()
                     break
-                
+
                 elapsed_time = time.time() - loop_start_time
                 sleep_time = frame_delay - elapsed_time
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+                # if sleep_time > 0:
+                #     time.sleep(sleep_time)
 
             except Exception as e:
                 print(f"TargetShooter: Error in capture/process task: {e}")
-                time.sleep(1) # Avoid busy loop on error
+                time.sleep(1)
 
         if cap.isOpened():
             cap.release()
         print("TargetShooter: Capture and processing thread finished.")
-        # Ensure the main managing loop also knows to stop if it hasn't already
         self.stop_event.set()
 
+    def get_stream_generator(self):
+        """
+        Yields multipart JPEG frames for HTTP streaming.
+        """
+        boundary = "frame"
+        while not self.stop_event.is_set():
+            try:
+                b64_frame = self.frame_queue.get(timeout=2)
+                jpg_bytes = base64.b64decode(b64_frame)
+                yield (
+                    b"--%b\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: %d\r\n\r\n" % (boundary.encode(), len(jpg_bytes))
+                )
+                yield jpg_bytes
+                yield b"\r\n"
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Stream generator error: {e}")
+                break
+        print("Stream generator exiting.")
 
-    # ... send_to_arduino, wait_for_ack, _calculate_error, _calculate_new_angles, _get_color_name, _is_target_centered, _is_angle_already_shot, _draw_crosshair ...
-    # These helper methods remain largely the same.
     def send_to_arduino(self, pan_angle, tilt_angle, shoot_command=False):
         if self.arduino is None or not self.arduino.is_open:
             print("Arduino not connected or port not open.")
@@ -325,7 +351,6 @@ class GameSession:
             self.kp_x = float(command_data.get("kp_x", self.kp_x))
             self.kp_y = float(command_data.get("kp_y", self.kp_y))
             self.no_balloon_timeout_setting = float(command_data.get("no_balloon_timeout", self.no_balloon_timeout_setting))
-            # Add other params if needed: conf_threshold, center_tolerance, etc.
             response_message = f"Parameters updated. FL:{self.focal_length}, OffsetX:{self.laser_offset_cm_x}, OffsetY:{self.laser_offset_cm_y}, Color:{self.target_color}, Timeout: {self.no_balloon_timeout_setting}"
             
             if action == "initial_config": # Reset game state on initial config
@@ -343,7 +368,6 @@ class GameSession:
             self.stop_event.set() # Also signal the capture loop
             response_message = "Game end requested. Stopping..."
         elif action == "emergency_stop":
-            # self.stop() will be called by manage_game_loop's finally, or directly if needed
             self.game_requested_stop = True # Ensure frame processing stops
             self.stop_event.set() # Signal all loops
             if self.arduino and self.arduino.is_open: # Immediate Arduino reset
@@ -377,15 +401,13 @@ class GameSession:
         if self.model is None:
             return {"status": "error", "message": "YOLO Model not loaded.", "processed_frame": None, "game_state": self.get_current_game_state_dict()}
         
-        # Check stop flags at the beginning of processing each frame
         if self.game_over_due_to_timeout or self.game_requested_stop or self.stop_event.is_set():
             msg = "Game ended: Timeout." if self.game_over_due_to_timeout else "Game ended: User request."
             if self.stop_event.is_set() and not (self.game_over_due_to_timeout or self.game_requested_stop) :
-                 msg = "Game ended: System stop." # If stop_event was set externally
-            # self.stop_event.set() # Ensure it's set if logic here determines end
+                 msg = "Game ended: System stop."
             return {"status": "ended", "message": msg, "processed_frame": None, "game_state": self.get_current_game_state_dict()}
 
-        frame = frame_mat # Already a numpy array
+        frame = frame_mat
         
         if frame.shape[1] != IMAGE_WIDTH or frame.shape[0] != IMAGE_HEIGHT:
             frame = cv2.resize(frame, (IMAGE_WIDTH, IMAGE_HEIGHT))
@@ -394,23 +416,20 @@ class GameSession:
         balloon_detected_this_frame = False
         status_message = "Processing..."
 
-        results = self.model.predict(source=frame, show=False, verbose=False, conf=self.conf_threshold) # Use self.conf_threshold
+        results = self.model.predict(source=frame, show=False, verbose=False, conf=self.conf_threshold)
         self._draw_crosshair(frame)
 
         best_target = None
-        best_confidence = 0 # Renamed from self.conf_threshold to avoid confusion
+        best_confidence = 0
 
         for result in results:
             if result.boxes is None or len(result.boxes) == 0:
                 continue
             boxes = result.boxes.xyxy.cpu().numpy()
             cls_ids = result.boxes.cls.cpu().numpy()
-            confs = result.boxes.conf.cpu().numpy() # Confs from YOLO are per detection
+            confs = result.boxes.conf.cpu().numpy()
 
             for i, box in enumerate(boxes):
-                # Already filtered by `conf` in model.predict, but can double check if needed
-                # if confs[i] < self.conf_threshold: 
-                #     continue
                 label = self.model.names[int(cls_ids[i])]
                 if label.lower() != 'balloon':
                     continue
@@ -422,7 +441,7 @@ class GameSession:
                 error_x_calc, error_y_calc = self._calculate_error(center_x, center_y)
                 target_pan_for_check, target_tilt_for_check = self._calculate_new_angles(error_x_calc, error_y_calc)
 
-                if self._is_angle_already_shot(target_pan_for_check, target_tilt_for_check, threshold=15): # Increased threshold
+                if self._is_angle_already_shot(target_pan_for_check, target_tilt_for_check, threshold=15):
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                     cv2.putText(frame, "Already Shot", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                     continue
@@ -430,7 +449,6 @@ class GameSession:
                 balloon_detected_this_frame = True
 
                 pixel_width = x2 - x1
-                # Use self.focal_length and self.balloon_width
                 estimated_depth = (self.focal_length * self.balloon_width) / pixel_width if pixel_width > 0 else 0.0
                 estimated_depth *= 100
                 if 30 < estimated_depth < 1000: self.depth = estimated_depth
@@ -447,7 +465,7 @@ class GameSession:
 
                 info_text = f"{label} ({color_name}) {confs[i]:.2f} D:{self.depth:.1f}cm"
                 
-                if confs[i] > best_confidence: # Use local best_confidence for current frame's best target
+                if confs[i] > best_confidence:
                     best_confidence = confs[i]
                     best_target = {'pos': (center_x, center_y), 'box': (x1, y1, x2, y2), 'info': info_text}
                 
@@ -456,15 +474,12 @@ class GameSession:
         
         if balloon_detected_this_frame:
             self.last_balloon_detected_time = current_time
-        elif current_time - self.last_balloon_detected_time > self.no_balloon_timeout_setting: # Use setting
+        elif current_time - self.last_balloon_detected_time > self.no_balloon_timeout_setting:
             status_message = f"No unshot {self.target_color} balloons for {self.no_balloon_timeout_setting}s. Game Over."
             print(status_message)
-            self.game_over_due_to_timeout = True # Set flag
+            self.game_over_due_to_timeout = True
             if self.arduino: self.send_to_arduino(INIT_PAN, INIT_TILT)
-            # self.stop_event.set() # Signal loops to stop due to game logic
-            # The return path for "ended" status will handle this.
         
-        # Movement and shooting logic
         if best_target and (current_time - self.last_movement_time) > MOVEMENT_COOLDOWN:
             self.last_movement_time = current_time
             center_x, center_y = best_target['pos']
@@ -506,11 +521,9 @@ class GameSession:
         elif not balloon_detected_this_frame and not self.game_over_due_to_timeout and not self.game_requested_stop :
              status_message = f"Scanning for {self.target_color} balloons..."
 
-
         cv2.putText(frame, f"Pan: {int(self.current_pan)} Tilt: {int(self.current_tilt)}", (10, IMAGE_HEIGHT - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         cv2.putText(frame, f"Status: {status_message}", (10, IMAGE_HEIGHT - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         cv2.putText(frame, f"Timeout in: {max(0, self.no_balloon_timeout_setting - (current_time - self.last_balloon_detected_time)):.1f}s", (10, IMAGE_HEIGHT - 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,100,100),1)
-
 
         _, jpg_frame = cv2.imencode('.jpg', frame)
         b64_frame = base64.b64encode(jpg_frame).decode('utf-8')
@@ -524,24 +537,22 @@ class GameSession:
         }
 
     def stop(self):
-        if not self.stop_event.is_set(): # Prevent redundant stop actions
+        if not self.stop_event.is_set():
             print("TargetShooter: Initiating stop sequence...")
-            self.stop_event.set() # Signal all loops to stop
+            self.stop_event.set()
 
             if self.capture_thread and self.capture_thread.is_alive():
                 print("TargetShooter: Waiting for capture thread to join...")
-                self.capture_thread.join(timeout=3.0) # Wait for thread to finish
+                self.capture_thread.join(timeout=3.0)
                 if self.capture_thread.is_alive():
                     print("TargetShooter: Capture thread did not join in time.")
             
-            self.game_requested_stop = True # Ensure other parts know game is stopping
+            self.game_requested_stop = True
 
             if self.arduino and self.arduino.is_open:
-                self.send_to_arduino(INIT_PAN, INIT_TILT) # Home Arduino
+                self.send_to_arduino(INIT_PAN, INIT_TILT)
                 print("TargetShooter: Sent home command to Arduino on stop.")
             
-            # WebSocket closing should be handled by the manage_game_loop's finally block
-            # or by main.py if the connection drops.
             print("TargetShooter: Stop sequence complete.")
         else:
             print("TargetShooter: Stop already in progress or completed.")
