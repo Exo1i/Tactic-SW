@@ -305,12 +305,12 @@ class GameSession:
             
             # Step 3: Move to play position
             print(f"[ROBOT PLAN] 3. Move to Play position {position} (Enable={self.ENABLE_ACTIVE}, Pickup={self.PICKUP_FALSE})...")
-            await self.send_command_to_esp32(*play_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await self.send_command_to_esp32(*play_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(play_delay)
             
             # Step 4: Return to home
             print(f"[ROBOT PLAN] 4. Returning to Home (Enable={self.ENABLE_INACTIVE}, Pickup={self.PICKUP_FALSE})...")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(home_delay)
             
             print(f"[ROBOT] Planned sequence for cell {position} complete.")
