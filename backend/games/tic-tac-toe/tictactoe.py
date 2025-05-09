@@ -4,12 +4,13 @@ import cv2
 import numpy as np
 import base64
 import time
+import asyncio
 from tensorflow.keras.models import load_model
 from .utils import detections, imutils
 from alphabeta import Tic, get_enemy, determine
 
 class GameSession:
-    def __init__(self, config):
+    def __init__(self, config, esp32_client=None):
         try:
             model_path = config.get("model", "data/model.h5")
             if not os.path.exists(model_path):
@@ -33,6 +34,25 @@ class GameSession:
         self.move_detected_in_last_cycle = False
         self.paper_detection_threshold = 170
         self.grid_detection_threshold = 170
+        
+        # ESP32 WebSocket client
+        self.esp32_client = esp32_client
+        
+        # Servo position mapping
+        self.angle_map = {
+            0: [150, 110, 170], 1: [150, 90, 170], 2: [150, 70, 170],
+            3: [125, 115, 135], 4: [115, 90, 135], 5: [125, 65, 135],
+            6: [100, 120, 120], 7: [90, 90, 120], 8: [100, 57, 120],
+            'home': [180, 90, 0],
+            'pickup3': [155, 170, 150], 'pickup2': [125, 165, 130],
+            'pickup1': [155, 180, 150], 'pickup0': [125, 180, 130],
+        }
+        self.next_pickup_index = 0
+        self.NUM_PICKUP_POSITIONS = 4
+        self.ENABLE_ACTIVE = 1
+        self.ENABLE_INACTIVE = 0
+        self.PICKUP_TRUE = 1
+        self.PICKUP_FALSE = 0
 
     def zoom_frame(self, frame, zoom=2.0):
         """Zoom into the center of the frame by the specified factor."""
@@ -202,7 +222,91 @@ class GameSession:
 
         return template
 
-    def process_frame(self, frame_bytes):
+    async def send_command_to_esp32(self, servo1_angle, servo2_angle, servo3_angle, enable_signal, pickup_flag):
+        """Send servo command to ESP32 via WebSocket"""
+        if self.esp32_client is None:
+            print("[ESP32] No ESP32 client available, skipping command")
+            return False
+            
+        try:
+            s1 = int(servo1_angle)
+            s2 = int(servo2_angle)
+            s3 = int(servo3_angle)
+            enable = int(enable_signal)
+            pickup = int(pickup_flag)
+            
+            command = f"{s1},{s2},{s3},{enable},{pickup}"
+            print(f"[ESP32] Sending command: {command}")
+            
+            await self.esp32_client.send_json({
+                "action": "command",
+                "command": command
+            })
+            return True
+        except Exception as e:
+            print(f"[ESP32] Error sending command: {e}")
+            return False
+    
+    async def move_robot_arm(self, position):
+        """Move robot arm to play a piece at the specified position"""
+        if self.esp32_client is None:
+            print("[ESP32] No ESP32 client available, skipping robot movement")
+            return False
+            
+        pickup_delay = 2.0
+        home_delay = 2.0
+        play_delay = 2.0
+        
+        # Get pickup position
+        pickup_key = f'pickup{self.next_pickup_index}'
+        print(f"[ROBOT] Planning sequence using pickup position: {pickup_key}")
+        self.next_pickup_index = (self.next_pickup_index + 1) % self.NUM_PICKUP_POSITIONS
+        
+        # Check if position is valid
+        required_keys = [pickup_key, 'home', position]
+        for key in required_keys:
+            if key not in self.angle_map:
+                print(f"[ERROR] Robot angle map missing required key: '{key}'. Aborting planned sequence.")
+                return False
+                
+        pickup_angles = self.angle_map[pickup_key]
+        home_angles = self.angle_map['home']
+        play_angles = self.angle_map[position]
+        
+        try:
+            # Step 1: Move to pickup position
+            print(f"[ROBOT PLAN] 1. Move to {pickup_key} (Enable={self.ENABLE_ACTIVE}, Pickup={self.PICKUP_TRUE})...")
+            await self.send_command_to_esp32(*pickup_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
+            await asyncio.sleep(pickup_delay)
+            
+            # Step 2: Move to home position
+            print(f"[ROBOT PLAN] 2. Move to Home (Enable={self.ENABLE_ACTIVE}, Pickup={self.PICKUP_FALSE})...")
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await asyncio.sleep(home_delay)
+            
+            # Step 3: Move to play position
+            print(f"[ROBOT PLAN] 3. Move to Play position {position} (Enable={self.ENABLE_ACTIVE}, Pickup={self.PICKUP_FALSE})...")
+            await self.send_command_to_esp32(*play_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await asyncio.sleep(play_delay)
+            
+            # Step 4: Return to home
+            print(f"[ROBOT PLAN] 4. Returning to Home (Enable={self.ENABLE_INACTIVE}, Pickup={self.PICKUP_FALSE})...")
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
+            await asyncio.sleep(home_delay)
+            
+            print(f"[ROBOT] Planned sequence for cell {position} complete.")
+            return True
+        except Exception as e:
+            print(f"[ERROR] Unexpected error during robot sequence planning/execution: {e}")
+            # Try emergency return home
+            try:
+                print("[ROBOT] Attempting emergency return home...")
+                await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
+            except Exception as emergency_e:
+                print(f"[ERROR] Failed emergency return: {emergency_e}")
+            return False
+
+    async def process_frame(self, frame_bytes):
         np_arr = np.frombuffer(frame_bytes, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if frame is None:
@@ -335,6 +439,9 @@ class GameSession:
                                     # Draw computer's move
                                     xi, yi, wi, hi = map(int, grid[computer_move])
                                     bird_view_display = self.draw_shape(bird_view_display, ai_player, (xi, yi, wi, hi))
+                                    
+                                    # Send move to ESP32 if available
+                                    asyncio.create_task(self.move_robot_arm(computer_move))
                                     
                                     # Update state tracking
                                     self.previous_state = [self.history.get(i, {}).get('shape') for i in range(9)]

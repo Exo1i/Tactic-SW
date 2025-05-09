@@ -14,3 +14,4 @@ coverage/
 *.log
 /backend/games/venv
 /.venv
+/venv

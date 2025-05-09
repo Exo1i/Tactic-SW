@@ -6,10 +6,12 @@ import sys
 import os
 import json
 import inspect
+import asyncio
 
 # Import memory matching backend for color/yolo WebSocket endpoints
 from games import memory_matching_backend
 from games.rubiks_cube_game import RubiksCubeGame
+from utils.esp32_client import esp32_client
 
 app = FastAPI()
 
@@ -39,6 +41,23 @@ GAME_MODULES = {
     "memory-matching": "games.memory_matching_backend",
 }
 
+# ESP32 connection status endpoint
+@app.get("/esp32/status")
+async def esp32_status():
+    return {"connected": esp32_client.connected}
+
+# ESP32 send command endpoint
+@app.post("/esp32/command")
+async def send_esp32_command(command: dict):
+    if "cmd" not in command:
+        return {"status": "error", "message": "Missing 'cmd' in request"}
+    
+    success = await esp32_client.send_json(command)
+    if success:
+        return {"status": "success"}
+    else:
+        return {"status": "error", "message": "Failed to send command to ESP32"}
+
 @app.websocket("/ws/{game_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str):
     await websocket.accept()
@@ -65,9 +84,10 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             elif "bytes" in first_message:
                 first_frame_bytes = first_message["bytes"]
             if config is not None:
-                game_session = RubiksCubeGame(config)
+                # Pass ESP32 client to the game
+                game_session = RubiksCubeGame(config, esp32_client=esp32_client)
             else:
-                game_session = RubiksCubeGame()
+                game_session = RubiksCubeGame(esp32_client=esp32_client)
         else:
             # Default: try to receive config as first message, else treat as frame
             first_message = await websocket.receive()
@@ -81,9 +101,18 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             elif "bytes" in first_message:
                 first_frame_bytes = first_message["bytes"]
             if config is not None:
-                game_session = game_module.GameSession(config)
+                # Pass ESP32 client to the game if the class accepts it
+                try:
+                    # Check if the GameSession class accepts esp32_client parameter
+                    game_session = game_module.GameSession(config, esp32_client=esp32_client)
+                except TypeError:
+                    # If it doesn't accept esp32_client, use the original constructor
+                    game_session = game_module.GameSession(config)
             else:
-                game_session = game_module.GameSession()
+                try:
+                    game_session = game_module.GameSession(esp32_client=esp32_client)
+                except TypeError:
+                    game_session = game_module.GameSession()
     except Exception as e:
         await websocket.send_json({"status": "error", "message": f"Failed to load game: {e}"})
         await websocket.close()
@@ -183,6 +212,16 @@ async def ws_memory_matching_color(websocket: WebSocket):
 @app.websocket("/ws/memory-matching/yolo")
 async def ws_memory_matching_yolo(websocket: WebSocket):
     await memory_matching_backend.stream_game(websocket, "yolo")
+
+@app.on_event("startup")
+async def startup_event():
+    # Connect to ESP32 on startup
+    await esp32_client.connect()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Close ESP32 connection on shutdown
+    await esp32_client.close()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
