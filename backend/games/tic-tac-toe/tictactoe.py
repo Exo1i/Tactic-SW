@@ -37,6 +37,7 @@ class GameSession:
         
         # ESP32 WebSocket client
         self.esp32_client = esp32_client
+        self.switch_command_sent = False
         
         # Servo position mapping
         self.angle_map = {
@@ -53,6 +54,24 @@ class GameSession:
         self.ENABLE_INACTIVE = 0
         self.PICKUP_TRUE = 1
         self.PICKUP_FALSE = 0
+
+    async def _send_switch_command(self):
+        """Send a switch command to ESP32 to activate ARM mode"""
+        if self.esp32_client is None:
+            print("[ESP32] No ESP32 client available, skipping switch command")
+            return False
+            
+        try:
+            print("[ESP32] Sending switch command to activate ARM mode")
+            await self.esp32_client.send_json({
+                "action": "switch",
+                "game": "ARM"
+            })
+            self.switch_command_sent = True
+            return True
+        except Exception as e:
+            print(f"[ESP32] Error sending switch command: {e}")
+            return False
 
     def zoom_frame(self, frame, zoom=2.0):
         """Zoom into the center of the frame by the specified factor."""
@@ -307,6 +326,10 @@ class GameSession:
             return False
 
     async def process_frame(self, frame_bytes):
+        # Send the switch command on the first frame if not sent already
+        if not self.switch_command_sent and self.esp32_client is not None:
+            await self._send_switch_command()
+            
         np_arr = np.frombuffer(frame_bytes, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if frame is None:
