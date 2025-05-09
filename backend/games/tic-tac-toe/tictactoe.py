@@ -295,7 +295,7 @@ class GameSession:
         try:
             # Step 1: Move to pickup position
             print(f"[ROBOT PLAN] 1. Move to {pickup_key} (Enable={self.ENABLE_ACTIVE}, Pickup={self.PICKUP_TRUE})...")
-            await self.send_command_to_esp32(*pickup_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
+            await self.send_command_to_esp32(*pickup_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
             await asyncio.sleep(pickup_delay)
             
             # Step 2: Move to home position
