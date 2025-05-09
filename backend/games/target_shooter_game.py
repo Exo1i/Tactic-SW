@@ -33,6 +33,31 @@ NO_BALLOON_TIMEOUT = 10
 RETURN_TO_CENTER_DELAY = 1.0
 CAPTURE_FPS_TARGET = 30 # Target FPS for camera capture loop
 
+class VideoStream:
+    def __init__(self, src):
+        self.cap = cv2.VideoCapture(src)
+        self.ret, self.frame = self.cap.read()
+        self.stopped = False
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+
+    def update(self):
+        while not self.stopped:
+            ret, frame = self.cap.read()
+            with self.lock:
+                self.ret = ret
+                self.frame = frame
+
+    def read(self):
+        with self.lock:
+            return self.ret, self.frame.copy() if self.frame is not None else (False, None)
+
+    def release(self):
+        self.stopped = True
+        self.thread.join()
+        self.cap.release()
+
 class GameSession:
     def __init__(self, config):
         self.arduino = config.get("serial_instance")
@@ -80,6 +105,7 @@ class GameSession:
         self.stop_event = threading.Event()
         self._async_loop = None # To store the asyncio loop for threadsafe calls
         self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
+        self.video_stream = None
 
         # Initial Arduino homing is done here, assuming serial is ready
         if self.arduino:
@@ -138,10 +164,13 @@ class GameSession:
 
     def _capture_and_process_task(self):
         print(f"TargetShooter: Attempting to open camera: {self.webcam_ip}")
-        cap = cv2.VideoCapture(self.webcam_ip)
+        # Use threaded video capture for faster frame acquisition
+        self.video_stream = VideoStream(self.webcam_ip)
         time.sleep(1) # Give camera time to initialize
 
-        if not cap.isOpened():
+        # Check if stream is opened
+        ret, frame = self.video_stream.read()
+        if not ret or frame is None:
             print(f"TargetShooter: CRITICAL - Failed to open camera stream at {self.webcam_ip}")
             error_msg = {"status": "error", "message": f"Failed to open camera: {self.webcam_ip}"}
             if self.websocket and self._async_loop:
@@ -150,21 +179,15 @@ class GameSession:
             return
 
         print(f"TargetShooter: Camera {self.webcam_ip} opened successfully.")
-        frame_delay = 1.0 / 1000
+        frame_delay = 1.0 / 30
 
         while not self.stop_event.is_set():
             loop_start_time = time.time()
             try:
-                ret, frame = cap.read()
+                ret, frame = self.video_stream.read()
                 if not ret or frame is None:
                     print("TargetShooter: Failed to grab frame, retrying...")
-                    cap.release()
                     time.sleep(1)
-                    cap = cv2.VideoCapture(self.webcam_ip) # Try to reopen
-                    if not cap.isOpened():
-                        print(f"TargetShooter: CRITICAL - Failed to reopen camera {self.webcam_ip}")
-                        self.stop_event.set() # Signal main loop to stop
-                        break
                     continue
 
                 response_data = self._process_single_frame_logic(frame)
@@ -192,7 +215,7 @@ class GameSession:
                     break
 
                 elapsed_time = time.time() - loop_start_time
-                sleep_time = frame_delay - elapsed_time
+                # sleep_time = frame_delay - elapsed_time
                 # if sleep_time > 0:
                 #     time.sleep(sleep_time)
 
@@ -200,8 +223,7 @@ class GameSession:
                 print(f"TargetShooter: Error in capture/process task: {e}")
                 time.sleep(1)
 
-        if cap.isOpened():
-            cap.release()
+        self.video_stream.release()
         print("TargetShooter: Capture and processing thread finished.")
         self.stop_event.set()
 
@@ -416,6 +438,7 @@ class GameSession:
         balloon_detected_this_frame = False
         status_message = "Processing..."
 
+        # Actually run YOLO prediction here (was commented out before)
         results = self.model.predict(source=frame, show=False, verbose=False, conf=self.conf_threshold)
         self._draw_crosshair(frame)
 
