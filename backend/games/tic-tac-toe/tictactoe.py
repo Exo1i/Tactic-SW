@@ -52,8 +52,8 @@ class GameSession:
         self.NUM_PICKUP_POSITIONS = 4
         self.ENABLE_ACTIVE = 1
         self.ENABLE_INACTIVE = 0
-        self.PICKUP_TRUE = 1
-        self.PICKUP_FALSE = 0
+        self.PICKUP_TRUE = 0
+        self.PICKUP_FALSE = 1
 
     async def _send_switch_command(self):
         """Send a switch command to ESP32 to activate ARM mode"""
@@ -295,7 +295,7 @@ class GameSession:
         try:
             # Step 1: Move to pickup position
             print(f"[ROBOT PLAN] 1. Move to {pickup_key} (Enable={self.ENABLE_ACTIVE}, Pickup={self.PICKUP_TRUE})...")
-            await self.send_command_to_esp32(*pickup_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await self.send_command_to_esp32(*pickup_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(pickup_delay)
             
             # Step 2: Move to home position
