@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import base64
 import time
+import asyncio
 
 # --- Hardcoded IP camera URL ---
 IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
@@ -43,7 +44,7 @@ def create_multitracker():
     raise RuntimeError("MultiTracker not available in your OpenCV installation.")
 
 class GameSession:
-    def __init__(self):
+    def __init__(self, config=None, esp32_client=None):
         self.ball_position = None
         self.ball_under_cup = None
         self.last_nearest_cup = None
@@ -62,110 +63,218 @@ class GameSession:
         self.stopped = False
         self.cap = cv2.VideoCapture(IPCAM_URL)
         time.sleep(1)  # Give the IP camera time to initialize
+        
+        # ESP32 client
+        self.esp32_client = esp32_client
+        self.switch_command_sent = False
+        self.command_lock = asyncio.Lock()
+        
+        # Servo control values
+        self.ENABLE_ACTIVE = 1
+        self.ENABLE_INACTIVE = 0
+        self.PICKUP_TRUE = 0
+        self.PICKUP_FALSE = 1
 
-    def stop(self):
-        """Explicitly stop and release the camera."""
-        if not self.stopped:
-            self.stopped = True
-            if self.cap is not None:
-                self.cap.release()
-                self.cap = None
+    async def _send_switch_command(self):
+        """Send a switch command to ESP32 to activate ARM mode"""
+        if self.esp32_client is None:
+            print("[ESP32] No ESP32 client available, skipping switch command")
+            return False
+            
+        try:
+            print("[ESP32] Sending switch command to activate ARM mode")
+            await self.esp32_client.send_json({
+                "action": "switch",
+                "game": "ARM"
+            })
+            self.switch_command_sent = True
+            return True
+        except Exception as e:
+            print(f"[ESP32] Error sending switch command: {e}")
+            return False
 
-    def get_ipcam_frame(self):
-        if self.stopped:
-            return None
-        if not self.cap or not self.cap.isOpened():
-            # Try to reopen if closed
-            self.cap = cv2.VideoCapture(IPCAM_URL)
-            # time.sleep(1)
-            if not self.cap.isOpened():
-                return None
-        # Flush buffer (optional, for IP cams)
-        for _ in range(2):
-            ret, frame = self.cap.read()
-        if not ret or frame is None or frame.size == 0:
-            return None
-        return frame
+    async def send_arm_command_async(self, degree1: int, degree2: int, degree3: int, magnet: int, movement: int) -> bool:
+        """
+        Asynchronous function to send an arm command via ESP32 WebSocket.
+        Includes retries on failure. Returns True on success, False on failure.
+        """
+        if self.esp32_client is None:
+            print("[ESP32] No ESP32 client available, skipping command")
+            return False
+            
+        # Input validation
+        if not (0 <= degree1 <= 180 and 0 <= degree2 <= 180 and 0 <= degree3 <= 180):
+            print(f"[ESP32] Invalid servo degrees: ({degree1}, {degree2}, {degree3}). Must be 0-180.")
+            return False
+        if magnet not in [0, 1]:
+            print(f"[ESP32] Invalid magnet value: {magnet}. Must be 0 or 1.")
+            return False
 
-    def detect_cups(self, frame):
-        update_green_threshold(frame)
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, green_lower, green_upper)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cups = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > 500 and len(contour) >= 5:
-                ellipse = cv2.fitEllipse(contour)
-                (center, axes, angle) = ellipse
-                major_axis = max(axes)
-                minor_axis = min(axes)
-                if 0.5 < (minor_axis/major_axis) < 1.5:
-                    hull = cv2.convexHull(contour)
-                    hull_area = cv2.contourArea(hull)
-                    if hull_area > 0:
-                        solidity = float(area)/hull_area
-                        if solidity > 0.8:
-                            cups.append(ellipse)
-        cups = sorted(cups, key=lambda x: x[0][0])[:3]
-        return cups
+        command = f"{degree1},{degree2},{degree3},{magnet},{movement}"
+        command_strip = command.strip()  # For logging
 
-    def detect_ball(self, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, ball_lower, ball_upper)
-        mask = cv2.erode(mask, None, iterations=2)
-        mask = cv2.dilate(mask, None, iterations=2)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest_contour = max(contours, key=cv2.contourArea)
-            ((x, y), radius) = cv2.minEnclosingCircle(largest_contour)
-            if radius > 5:
-                return (int(x), int(y))
-        return None
+        ARM_MAX_RETRIES = 10
+        ARM_RETRY_DELAY_SECONDS = 1.0
+        
+        # Send switch command if not sent already
+        if not self.switch_command_sent:
+            await self._send_switch_command()
 
-    def check_ball_under_cup(self, ball_pos, cup_ellipses):
-        if not hasattr(self, "last_ball_visible"):
-            self.last_ball_visible = True
-        if not hasattr(self, "last_moved_cup_before_hidden"):
-            self.last_moved_cup_before_hidden = None
+        async with self.command_lock:  # Ensure only one command at a time
+            attempt = 0
+            while attempt < ARM_MAX_RETRIES:
+                attempt += 1
+                print(f"[ESP32] Sending command (Attempt {attempt}/{ARM_MAX_RETRIES}): {command_strip}")
 
-        if ball_pos is None:
-            if self.last_ball_visible:
-                self.last_moved_cup_before_hidden = self.last_moved_cup_idx
-                self.last_ball_visible = False
-            return self.last_moved_cup_before_hidden
-        else:
-            self.last_ball_visible = True
+                try:
+                    success = await self.esp32_client.send_json({
+                        "action": "command",
+                        "command": command
+                    })
+                    
+                    if success:
+                        print(f"[ESP32] Command '{command_strip}' sent successfully on attempt {attempt}.")
+                        # Add 2-second delay after command (like in esp32_client.py)
+                        await asyncio.sleep(2.0)
+                        return True
+                    else:
+                        print(f"[ESP32] Command '{command_strip}' failed to send on attempt {attempt}.")
+                except Exception as e:
+                    print(f"[ESP32] Error during command attempt {attempt}: {e}")
+                
+                # If attempt failed and more retries allowed, wait before next attempt
+                if attempt < ARM_MAX_RETRIES:
+                    print(f"[ESP32] Waiting {ARM_RETRY_DELAY_SECONDS}s before retry...")
+                    await asyncio.sleep(ARM_RETRY_DELAY_SECONDS)
 
-        min_distance = float('inf')
-        nearest_cup_idx = None
-        for i, ellipse in enumerate(cup_ellipses):
-            center = ellipse[0]
-            distance = np.linalg.norm(np.array(ball_pos) - np.array(center))
-            if distance < min_distance:
-                min_distance = distance
-                nearest_cup_idx = i
+            # If loop finishes without success
+            print(f"[ESP32] Command '{command_strip}' FAILED after {ARM_MAX_RETRIES} attempts.")
+            return False
 
-        self.last_nearest_cup = nearest_cup_idx
+    async def from_to_async(self, src: str, dest: str, card_id: int) -> bool:
+        """
+        Asynchronous function implementing the specific arm movement sequence.
+        Returns True on success, False on failure.
+        """
+        print(f"[ESP32] Executing ASYNC movement sequence: card {card_id} from {src} to {dest}")
+        success = True
 
-        if nearest_cup_idx is not None:
-            major_axis = max(cup_ellipses[nearest_cup_idx][1]) / 2
-            if min_distance < major_axis * 1.2:
-                self.ball_under_cup = nearest_cup_idx
-                return nearest_cup_idx
+        # Input validation (same as before)
+        if src not in ["card", "temp1", "temp2", "home"] or dest not in ["card", "temp1", "temp2", "trash", "home"]:
+            print(f"[ESP32] Invalid src ('{src}') or dest ('{dest}') location.")
+            return False
+        if src == "card" or dest == "card":
+            if not (0 <= card_id < len(arm_values)):
+                print(f"[ESP32] Invalid card_id {card_id} for arm_values length {len(arm_values)}")
+                return False
 
-        return self.ball_under_cup
+        try:
+            # --- Movement Sequences ---
+            # The logic is the same, but now each command call is async
+            ARM_SYNC_STEP_DELAY = 0.3
+            
+            if src == "card" and dest == "temp1":
+                print("[ESP32] Seq: card -> temp1")
+                if not await self.send_arm_command_async(arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_temp1[0], arm_temp1[1], arm_temp1[2], 0, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
 
-    def check_cup_in_frame(self, box, frame_width, frame_height):
-        x, y, w, h = box
-        return (x + w/2 > 0 and y + h/2 > 0 and 
-                x + w/2 < frame_width and y + h/2 < frame_height)
+            elif src == "card" and dest == "temp2":
+                print("[ESP32] Seq: card -> temp2")
+                if not await self.send_arm_command_async(arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_temp2[0], arm_temp2[1], arm_temp2[2], 0, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
 
-    def process_frame(self, frame_bytes=None):
-        # Use persistent cap object
+            elif src == "card" and dest == "trash":
+                print("[ESP32] Seq: card -> trash")
+                if not await self.send_arm_command_async(arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+
+            elif src == "temp1" and dest == "trash":
+                print("[ESP32] Seq: temp1 -> trash")
+                if not await self.send_arm_command_async(arm_temp1[0], arm_temp1[1], arm_temp1[2], 1, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+
+            elif src == "temp2" and dest == "trash":
+                print("[ESP32] Seq: temp2 -> trash")
+                if not await self.send_arm_command_async(arm_temp2[0], arm_temp2[1], arm_temp2[2], 1, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+
+            elif src == "temp1" and dest == "card":
+                print("[ESP32] Seq: temp1 -> card")
+                if not await self.send_arm_command_async(arm_temp1[0], arm_temp1[1], arm_temp1[2], 1, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 0, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+
+            elif src == "temp2" and dest == "card":
+                print("[ESP32] Seq: temp2 -> card")
+                if not await self.send_arm_command_async(arm_temp2[0], arm_temp2[1], arm_temp2[2], 1, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 0, 0): success = False
+                if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
+                if success and not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+
+            elif src == "home" and dest == "home":
+                print("[ESP32] Seq: home -> home")
+                if not await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+
+            else:
+                print(f"[ESP32] Invalid/unhandled src/dest combination: {src} -> {dest}")
+                success = False
+
+            # --- Post-Sequence Handling ---
+            if not success:
+                print(f"[ESP32] ASYNC movement sequence FAILED: A command failed for card {card_id} ({src} -> {dest})")
+                # Attempt safe recovery if sequence failed mid-way
+                if not (src == "home" and dest == "home"):
+                    print("[ESP32] Attempting to return arm home after sequence failure.")
+                    await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1)  # Try recovery
+                return False
+
+            print(f"[ESP32] ASYNC movement sequence COMPLETED successfully: card {card_id} ({src} -> {dest})")
+            return True
+
+        except Exception as e:  # Catch unexpected errors during sequence logic
+            print(f"[ESP32] Unexpected error during ASYNC sequence ({src} -> {dest}, card {card_id}): {e}")
+            print("[ESP32] Attempting to return arm home after unexpected sequence error.")
+            await self.send_arm_command_async(arm_home[0], arm_home[1], arm_home[2], 0, 1)  # Try recovery
+            return False
+
+    async def process_frame(self, frame_bytes=None):
+        # Send switch command on first frame if not sent already
+        if not self.switch_command_sent and self.esp32_client is not None:
+            await self._send_switch_command()
+            
+        # Existing frame processing code
         frame = self.get_ipcam_frame()
         if frame is None:
             return {"error": "Could not retrieve frame from IP camera"}
@@ -296,8 +405,145 @@ class GameSession:
             "raw_frame": raw_b64,
             "processed_frame": processed_b64,
         }
+
+        # At point of returning response, check if we need to move the arm
+        if success and not self.game_paused and not self.game_ended:
+            # If the game ended, we might want to move the arm
+            if self.game_ended and self.esp32_client is not None:
+                # In an async function, we can directly call the async method
+                if self.last_wanted_cup_idx is not None:
+                    # Start a background task to move the arm
+                    asyncio.create_task(self.from_to_async("card", "temp1", self.last_wanted_cup_idx))
+        
         return resp
+
+    def stop(self):
+        """Explicitly stop and release the camera."""
+        if not self.stopped:
+            self.stopped = True
+            if self.cap is not None:
+                self.cap.release()
+                self.cap = None
+
+    def get_ipcam_frame(self):
+        if self.stopped:
+            return None
+        if not self.cap or not self.cap.isOpened():
+            # Try to reopen if closed
+            self.cap = cv2.VideoCapture(IPCAM_URL)
+            # time.sleep(1)
+            if not self.cap.isOpened():
+                return None
+        # Flush buffer (optional, for IP cams)
+        for _ in range(2):
+            ret, frame = self.cap.read()
+        if not ret or frame is None or frame.size == 0:
+            return None
+        return frame
+
+    def detect_cups(self, frame):
+        update_green_threshold(frame)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, green_lower, green_upper)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cups = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area > 500 and len(contour) >= 5:
+                ellipse = cv2.fitEllipse(contour)
+                (center, axes, angle) = ellipse
+                major_axis = max(axes)
+                minor_axis = min(axes)
+                if 0.5 < (minor_axis/major_axis) < 1.5:
+                    hull = cv2.convexHull(contour)
+                    hull_area = cv2.contourArea(hull)
+                    if hull_area > 0:
+                        solidity = float(area)/hull_area
+                        if solidity > 0.8:
+                            cups.append(ellipse)
+        cups = sorted(cups, key=lambda x: x[0][0])[:3]
+        return cups
+
+    def detect_ball(self, frame):
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, ball_lower, ball_upper)
+        mask = cv2.erode(mask, None, iterations=2)
+        mask = cv2.dilate(mask, None, iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            ((x, y), radius) = cv2.minEnclosingCircle(largest_contour)
+            if radius > 5:
+                return (int(x), int(y))
+        return None
+
+    def check_ball_under_cup(self, ball_pos, cup_ellipses):
+        if not hasattr(self, "last_ball_visible"):
+            self.last_ball_visible = True
+        if not hasattr(self, "last_moved_cup_before_hidden"):
+            self.last_moved_cup_before_hidden = None
+
+        if ball_pos is None:
+            if self.last_ball_visible:
+                self.last_moved_cup_before_hidden = self.last_moved_cup_idx
+                self.last_ball_visible = False
+            return self.last_moved_cup_before_hidden
+        else:
+            self.last_ball_visible = True
+
+        min_distance = float('inf')
+        nearest_cup_idx = None
+        for i, ellipse in enumerate(cup_ellipses):
+            center = ellipse[0]
+            distance = np.linalg.norm(np.array(ball_pos) - np.array(center))
+            if distance < min_distance:
+                min_distance = distance
+                nearest_cup_idx = i
+
+        self.last_nearest_cup = nearest_cup_idx
+
+        if nearest_cup_idx is not None:
+            major_axis = max(cup_ellipses[nearest_cup_idx][1]) / 2
+            if min_distance < major_axis * 1.2:
+                self.ball_under_cup = nearest_cup_idx
+                return nearest_cup_idx
+
+        return self.ball_under_cup
+
+    def check_cup_in_frame(self, box, frame_width, frame_height):
+        x, y, w, h = box
+        return (x + w/2 > 0 and y + h/2 > 0 and 
+                x + w/2 < frame_width and y + h/2 < frame_height)
 
     def __del__(self):
         self.stop()
+
+# --- For backward compatibility with the old serial communication ---
+def send_arm_command_sync(degree1: int, degree2: int, degree3: int, magnet: int, movement: int) -> Optional[str]:
+    """
+    This function is kept for backward compatibility.
+    It will log a warning and return None, as it's been replaced by async methods.
+    """
+    print("WARNING: send_arm_command_sync is deprecated. Use GameSession.send_arm_command_async instead.")
+    return None
+
+def from_to_sync(src: str, dest: str, card_id: int) -> bool:
+    """
+    This function is kept for backward compatibility.
+    It will log a warning and return False, as it's been replaced by async methods.
+    """
+    print("WARNING: from_to_sync is deprecated. Use GameSession.from_to_async instead.")
+    return False
+
+async def from_to(websocket: WebSocket, src: str, dest: str, card_id: int) -> bool:
+    """
+    Asynchronous wrapper for shell game movement.
+    This should be called instead of the old from_to function.
+    """
+    # This function would need a reference to the GameSession object to work properly
+    print("WARNING: from_to is no longer supported directly. Use GameSession.from_to_async instead.")
+    return False
 
