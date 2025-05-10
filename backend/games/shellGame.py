@@ -4,6 +4,7 @@ import base64
 import time
 import queue  # Add for frame streaming
 import threading
+import serial
 
 # --- Threaded VideoStream class (copied from target_shooter_game) ---
 class VideoStream:
@@ -44,6 +45,9 @@ ball_upper = np.array([105, 255, 255])  # Upper HSV for light blue
 
 adaptive_green_threshold_low = 80
 adaptive_learning_rate = 0.01
+
+# Initialize serial for ESP32 (adjust port as needed)
+esp32_serial = serial.Serial('COM3', 9600, timeout=1)  # Change port if needed
 
 def update_green_threshold(frame):
     global adaptive_green_threshold_low
@@ -90,6 +94,8 @@ class GameSession:
         self.stopped = False
         self.video_stream = VideoStream(IPCAM_URL)
         self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
+        self.arm_command_sent = False
+        self.last_sent_cup = None
         time.sleep(1)  # Give the IP camera time to initialize
 
     def stop(self):
@@ -307,6 +313,79 @@ class GameSession:
             if all(now - t > self.motion_timeout for t in self.last_motion_times):
                 self.game_ended = True
                 self.last_wanted_cup_idx = self.last_moved_cup_idx
+
+        # --- SERIAL ARM CONTROL LOGIC (after game ends) ---
+        if self.game_ended and not self.arm_command_sent:
+            cup_positions = []
+            for i, (x, y, w, h) in enumerate(boxes):
+                center_x = int(x + w/2)
+                cup_positions.append((center_x, i))
+            cup_positions_sorted = sorted(cup_positions, key=lambda tup: tup[0])
+            cup_names = ["Left Cup", "Middle Cup", "Right Cup"]
+            cup_idx_to_name = {}
+            for idx, (_, i) in enumerate(cup_positions_sorted):
+                cup_idx_to_name[i] = cup_names[idx]
+            idx_to_lr = {i: lr for lr, (_, i) in enumerate(cup_positions_sorted)}
+
+            detected_cup_idx = None
+            if ball_position is None:
+                detected_cup_idx = self.last_ball_under_cup_idx
+            else:
+                detected_cup_idx = self.check_ball_under_cup(ball_position, cup_ellipses)
+
+            if detected_cup_idx is not None:
+                wantedCup = idx_to_lr.get(detected_cup_idx, -1)
+            else:
+                wantedCup = -1
+
+            if wantedCup in [0, 1, 2]:
+                # Define positions for each cup
+                if wantedCup == 0:
+                    cup_pos = "150,140,155"
+                    lift_pos = "150,140,80"
+                elif wantedCup == 1:
+                    cup_pos = "105,85,130"
+                    lift_pos = "145,85,90"
+                elif wantedCup == 2:
+                    cup_pos = "150,35,155"
+                    lift_pos = "150,35,100"
+                else:
+                    cup_pos = None
+                    lift_pos = None
+
+                if cup_pos and lift_pos:
+                    # 1. Go to cup position (magnet off)
+                    cmd1 = f"{cup_pos},0\n"
+                    esp32_serial.write(cmd1.encode())
+                    time.sleep(2.0)
+
+                    # 2. Activate magnet at cup position
+                    cmd2 = f"{cup_pos},1\n"
+                    esp32_serial.write(cmd2.encode())
+                    time.sleep(2.0)
+
+                    # 3. Go to lifting position (magnet on)
+                    cmd3 = f"{lift_pos},1\n"
+                    esp32_serial.write(cmd3.encode())
+                    time.sleep(2.0)
+
+                    # 4. Return to cup position (magnet on)
+                    cmd4 = f"{cup_pos},1\n"
+                    esp32_serial.write(cmd4.encode())
+                    time.sleep(2.0)
+
+                    # 5. Turn off magnet at cup position
+                    cmd5 = f"{cup_pos},0\n"
+                    esp32_serial.write(cmd5.encode())
+                    time.sleep(2.0)
+
+                    # 6. Return to home position
+                    home_cmd = "180,90,0,0\n"
+                    cmd6 = f"{lift_pos},0\n"
+                    esp32_serial.write(cmd6.encode())
+                    esp32_serial.write(home_cmd.encode())
+                    self.arm_command_sent = True
+                    self.last_sent_cup = wantedCup
 
         # Encode both frames to base64 JPEG
         _, raw_jpg = cv2.imencode('.jpg', raw_frame)
