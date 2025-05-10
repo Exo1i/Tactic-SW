@@ -10,7 +10,7 @@ except ImportError:
     WebSocket = None  # fallback for environments without FastAPI
 
 # --- Hardcoded IP camera URL ---
-IPCAM_URL = "http://192.168.43.1:8080/video"  # <-- Change to your webcam's IP
+IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
 
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
