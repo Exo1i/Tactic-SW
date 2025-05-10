@@ -53,8 +53,8 @@ class RubiksCubeGame:
         # Scanning variables
         self.current_scan_idx = 0
         self.SCAN_COOLDOWN: float = float(self.config.get('scan_cooldown', 0.5))
-        self.MOTOR_STABILIZATION_TIME: float = float(self.config.get('motor_stabilization_time', 0.7))
-        self.STABILITY_THRESHOLD: int = self.config.get('stability_threshold', 3)
+        self.MOTOR_STABILIZATION_TIME: float = float(self.config.get('motor_stabilization_time', 0.5))
+        self.STABILITY_THRESHOLD: int = self.config.get('stability_threshold', 2)
         self.stability_counter: int = 0
         self.last_scan_time: float = time.time()
         self.prev_face_colors_scan: Optional[list] = None
@@ -889,76 +889,160 @@ class RubiksCubeGame:
         if centers[0]!='U' or centers[1]!='R' or centers[2]!='F' or \
            centers[3]!='D' or centers[4]!='L' or centers[5]!='B':
             raise ValueError(f"{name} center pieces are not U,R,F,D,L,B in order. Got: {centers}")
+    
+    def _validate_cube(self, cube, order_name):
+        """Validate the cube state."""
+        if len(cube) != 54:
+            raise ValueError(f"{order_name} must be 54 characters")
+        counts = Counter(cube)
+        if len(counts) != 6 or any(count != 9 for count in counts.values()):
+            raise ValueError(f"{order_name} invalid: {counts} (need 9 of each of 6 colors)")
 
+    def _remap_colors_to_kociemba(self, cube_frblud):
+        """Remap cube colors to Kociemba notation."""
+        self._validate_cube(cube_frblud, "FRBLUD")
+        centers = [cube_frblud[i] for i in [4, 13, 22, 31, 40, 49]]
+        color_map = {
+            centers[4]: 'U', centers[1]: 'R', centers[0]: 'F',
+            centers[5]: 'D', centers[3]: 'L', centers[2]: 'B'
+        }
+        return color_map, ''.join(color_map[c] for c in cube_frblud)
 
-    def _solve_cube_with_kociemba(self, cube_state_frblud_actual_colors: str) -> Optional[str]:
+    def _remap_cube_to_kociemba(self, cube_frblud_remapped):
+        """Remap cube faces to Kociemba order."""
+        front, right, back, left, up, down = [cube_frblud_remapped[i:i + 9] for i in range(0, 54, 9)]
+        return up + right + front + down + left + back
+
+    def _get_solved_state(self, cube_frblud, color_map):
+        """Generate the solved cube state."""
+        centers = [cube_frblud[i] for i in [4, 13, 22, 31, 40, 49]]
+        return ''.join(c * 9 for c in centers)
+
+    def _is_cube_solved(self, cube_state):
+        """Check if the cube is already solved."""
+        for i in range(0, 54, 9):
+            face = cube_state[i:i + 9]
+            if not all(sticker == face[4] for sticker in face):
+                return False
+        return True
+
+    def _simplify_cube_moves(self, moves_str):
+        """Simplify a sequence of cube moves."""
+        moves = moves_str.strip().split()
+
+        def move_value(move):
+            if move.endswith("2"):
+                return 2
+            elif move.endswith("'"):
+                return -1
+            return 1
+
+        def value_to_move(face, value):
+            value = value % 4
+            if value == 0:
+                return None
+            elif value == 1:
+                return face
+            elif value == 2:
+                return face + "2"
+            elif value == 3:
+                return face + "'"
+
+        face_groups = [['L', 'R'], ['F', 'B'], ['U', 'D']]
+
+        # First pass: Combine consecutive moves of the same face
+        i = 0
+        simplified = []
+        while i < len(moves):
+            current_face = moves[i][0]
+            current_value = move_value(moves[i])
+
+            j = i + 1
+            while j < len(moves) and moves[j][0] == current_face:
+                current_value += move_value(moves[j])
+                j += 1
+
+            move = value_to_move(current_face, current_value)
+            if move:
+                simplified.append(move)
+
+            i = j
+
+        # Second pass: Combine moves by face groups
+        final_simplified = []
+        i = 0
+        while i < len(simplified):
+            current_face = simplified[i][0]
+
+            face_group = None
+            for group in face_groups:
+                if current_face in group:
+                    face_group = group
+                    break
+
+            if face_group:
+                counts = {face: 0 for face in face_group}
+                j = i
+
+                while j < len(simplified) and simplified[j][0] in face_group:
+                    face = simplified[j][0]
+                    counts[face] += move_value(simplified[j])
+                    j += 1
+
+                for face in face_group:
+                    move = value_to_move(face, counts[face])
+                    if move:
+                        final_simplified.append(move)
+
+                i = j
+            else:
+                final_simplified.append(simplified[i])
+                i += 1
+
+        return " ".join(final_simplified) if final_simplified else "No moves"   
+    def _solve_cube_with_kociemba(self, cube_frblud):
+        """Solve the cube given its FRBLUD state."""
         try:
-            if self._is_cube_solved_by_face_colors(cube_state_frblud_actual_colors):
-                self.status_message = "Cube is already solved."; print(self.status_message); return ""
+            if self._is_cube_solved(cube_frblud):
+                print("\nCube is already solved! No moves needed.")
+                return ""
 
-            # Centers from FRBLUD string (actual colors from scan)
-            # F:0-8, R:9-17, B:18-26, L:27-35, U:36-44, D:45-53
-            center_F_actual = cube_state_frblud_actual_colors[4]
-            center_R_actual = cube_state_frblud_actual_colors[13]
-            center_B_actual = cube_state_frblud_actual_colors[22]
-            center_L_actual = cube_state_frblud_actual_colors[31]
-            center_U_actual = cube_state_frblud_actual_colors[40]
-            center_D_actual = cube_state_frblud_actual_colors[49]
+            color_map, cube_frblud_remapped = self._remap_colors_to_kociemba(cube_frblud)
+            scrambled_kociemba = self._remap_cube_to_kociemba(cube_frblud_remapped)
+            solved_frblud = self._get_solved_state(cube_frblud, color_map)
+            _, solved_frblud_remapped = self._remap_colors_to_kociemba(solved_frblud)
+            solved_kociemba = self._remap_cube_to_kociemba(solved_frblud_remapped)
+            self._validate_cube(scrambled_kociemba, "Scrambled Kociemba")
+            self._validate_cube(solved_kociemba, "Solved Kociemba")
+            solution = kociemba.solve(scrambled_kociemba, solved_kociemba)
 
-            kociemba_face_map_actual_to_kociemba_notation = {
-                center_U_actual: 'U', center_R_actual: 'R', center_F_actual: 'F',
-                center_D_actual: 'D', center_L_actual: 'L', center_B_actual: 'B'
-            }
-            if len(kociemba_face_map_actual_to_kociemba_notation) != 6:
-                unique_centers_detected = {center_F_actual, center_R_actual, center_B_actual, center_L_actual, center_U_actual, center_D_actual}
-                raise ValueError(f"Invalid centers for Kociemba map. Expected 6 unique actual colors for centers, got {len(unique_centers_detected)}: {unique_centers_detected}")
+            u_replacement = "R L F2 B2 R' L' D R L F2 B2 R' L'"
+            u_prime_replacement = "R L F2 B2 R' L' D' R L F2 B2 R' L'"
+            u2_replacement = "R L F2 B2 R' L' D2 R L F2 B2 R' L'"
 
-            # Convert FRBLUD (actual colors) to Kociemba notation characters (URFDLB)
-            # The FRBLUD string is already ordered by face.
-            # Face U (actual colors) = cube_state_frblud_actual_colors[36:45]
-            # Face R (actual colors) = cube_state_frblud_actual_colors[9:18]
-            # ...and so on.
-            
-            kociemba_input_str_parts = {
-                'U': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[36:45]]),
-                'R': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[9:18]]),
-                'F': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[0:9]]),
-                'D': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[45:54]]),
-                'L': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[27:36]]),
-                'B': "".join([kociemba_face_map_actual_to_kociemba_notation[c] for c in cube_state_frblud_actual_colors[18:27]]),
-            }
-            kociemba_input_str = (kociemba_input_str_parts['U'] + kociemba_input_str_parts['R'] + 
-                                  kociemba_input_str_parts['F'] + kociemba_input_str_parts['D'] +
-                                  kociemba_input_str_parts['L'] + kociemba_input_str_parts['B'])
-            
-            self._validate_kociemba_string(kociemba_input_str, "Kociemba Input String (from mapped actual colors)")
-            
-            raw_solution_str = kociemba.solve(kociemba_input_str)
-            print(f"Kociemba raw solution: {raw_solution_str}")
+            moves = solution.split()
+            modified_solution = []
+            for move in moves:
+                if move == "U":
+                    modified_solution.append(u_replacement)
+                elif move == "U'":
+                    modified_solution.append(u_prime_replacement)
+                elif move == "U2":
+                    modified_solution.append(u2_replacement)
+                else:
+                    modified_solution.append(move)
 
-            u_alg = "R L F2 B2 R' L' D R L F2 B2 R' L'"; up_alg = "R L F2 B2 R' L' D' R L F2 B2 R' L'"; u2_alg = "R L F2 B2 R' L' D2 R L F2 B2 R' L'"
-            
-            final_solution_moves = []
-            for move_token in raw_solution_str.split():
-                if move_token == "U": final_solution_moves.append(u_alg)
-                elif move_token == "U'": final_solution_moves.append(up_alg)
-                elif move_token == "U2": final_solution_moves.append(u2_alg) 
-                else: final_solution_moves.append(move_token)
-            
-            solution_with_urepl = " ".join(final_solution_moves)
-            simplified_solution_str = self._simplify_cube_moves_basic(solution_with_urepl) 
-            
-            print(f"Final solution ({len(simplified_solution_str.split())} moves): {simplified_solution_str}")
-            return simplified_solution_str
+            final_solution = " ".join(modified_solution)
+            optimized_solution = self._simplify_cube_moves(final_solution)
+            print("\nOriginal solution length:", len(final_solution.split()))
+            print("Optimized solution length:", len(optimized_solution.split()))
 
-        except ValueError as ve: 
-            self.error_message = f"Kociemba ValueError: {ve}"; print(f"! ERROR: {self.error_message}"); return None
-        except KeyError as ke: 
-            self.error_message = f"Kociemba map KeyError: '{ke}'. Color not found in map. FRBLUD state: {cube_state_frblud_actual_colors[:9]}..."
-            print(f"! ERROR: {self.error_message}"); return None
-        except Exception as e: 
-            self.error_message = f"Solve Exception: {type(e).__name__} - {e}"; print(f"! ERROR: {self.error_message}"); return None
+            return optimized_solution
 
+        except Exception as e:
+            print(f"Error solving cube: {str(e)}")
+            return None
+        
     def _is_cube_solved_by_face_colors(self, cube_state_str: str) -> bool:
         if len(cube_state_str) != 54: return False
         for i in range(0, 54, 9): 
@@ -1099,7 +1183,7 @@ class RubiksCubeGame:
         
         # Standard Western fixed centers (overrides scanned centers if you prefer fixed ones)
         # This is often more robust if center detection is noisy.
-        predefined_centers = {'F':'G', 'R':'R', 'B':'B', 'L':'O', 'U':'W', 'D':'Y'}
+        predefined_centers = {'F':'B', 'R':'O', 'B':'G', 'L':'R', 'U':'W', 'D':'Y'}
 
         temp_cube_state[4]  = predefined_centers['F'] 
         temp_cube_state[13] = predefined_centers['R'] 
