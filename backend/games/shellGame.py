@@ -3,9 +3,14 @@ import numpy as np
 import base64
 import time
 import asyncio
+from typing import Optional
+try:
+    from fastapi import WebSocket
+except ImportError:
+    WebSocket = None  # fallback for environments without FastAPI
 
 # --- Hardcoded IP camera URL ---
-IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
+IPCAM_URL = "http://192.168.43.1:8080/video"  # <-- Change to your webcam's IP
 
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
@@ -17,6 +22,14 @@ ball_upper = np.array([105, 255, 255])  # Upper HSV for light blue
 
 adaptive_green_threshold_low = 80
 adaptive_learning_rate = 0.01
+
+# --- Arm Position Constants (copied from memory_matching_backend.py) ---
+arm_values = [[110, 40, 125], [87, 65, 120], [87, 110, 120], [110, 140, 125],
+              [150, 55, 155], [130, 80, 140], [130, 105, 140], [150, 125, 155]]
+arm_home = [180, 90, 0]
+arm_temp1 = [90, 10, 120]
+arm_temp2 = [90, 170, 120]
+arm_trash = [140, 0, 140]
 
 def update_green_threshold(frame):
     global adaptive_green_threshold_low
@@ -538,7 +551,7 @@ def from_to_sync(src: str, dest: str, card_id: int) -> bool:
     print("WARNING: from_to_sync is deprecated. Use GameSession.from_to_async instead.")
     return False
 
-async def from_to(websocket: WebSocket, src: str, dest: str, card_id: int) -> bool:
+async def from_to(websocket, src: str, dest: str, card_id: int) -> bool:
     """
     Asynchronous wrapper for shell game movement.
     This should be called instead of the old from_to function.
