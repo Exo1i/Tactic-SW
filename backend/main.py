@@ -122,7 +122,8 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
         
         if game_id == "shell-game":
             # Save singleton for streaming
-            shell_game_session = game_module.GameSession()
+            # Pass esp32_client to ShellGame
+            shell_game_session = game_module.ShellGame(esp32_client=esp32_client)
             game_session = shell_game_session
         elif game_id == "rubiks":
             # Wait for initial config message (optional)

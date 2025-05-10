@@ -4,7 +4,10 @@ import base64
 import time
 import queue  # Add for frame streaming
 import threading
-import serial
+import asyncio
+# import serial  # REMOVE: No longer needed
+
+from utils.esp32_client import esp32_client  # ADD: Use shared ESP32 client
 
 # --- Threaded VideoStream class (copied from target_shooter_game) ---
 class VideoStream:
@@ -33,7 +36,7 @@ class VideoStream:
         self.cap.release()
 
 # --- Hardcoded IP camera URL ---
-IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
+IPCAM_URL = "http://192.168.41.139:4747/video"  # <-- Change to your webcam's IP
 
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
@@ -46,8 +49,8 @@ ball_upper = np.array([105, 255, 255])  # Upper HSV for light blue
 adaptive_green_threshold_low = 80
 adaptive_learning_rate = 0.01
 
-# Initialize serial for ESP32 (adjust port as needed)
-esp32_serial = serial.Serial('COM3', 9600, timeout=1)  # Change port if needed
+# REMOVE: Serial initialization
+# esp32_serial = serial.Serial('COM3', 9600, timeout=1)  # Change port if needed
 
 def update_green_threshold(frame):
     global adaptive_green_threshold_low
@@ -74,8 +77,9 @@ def create_multitracker():
         return cv2.MultiTracker_create()
     raise RuntimeError("MultiTracker not available in your OpenCV installation.")
 
-class GameSession:
-    def __init__(self):
+class ShellGame:
+    def __init__(self, esp32_client=None):
+        self.esp32_client = esp32_client  # Store the ESP32 client if provided
         self.ball_position = None
         self.ball_under_cup = None
         self.last_nearest_cup = None
@@ -354,36 +358,8 @@ class GameSession:
                     lift_pos = None
 
                 if cup_pos and lift_pos:
-                    # 1. Go to cup position (magnet off)
-                    cmd1 = f"{cup_pos},0\n"
-                    esp32_serial.write(cmd1.encode())
-                    time.sleep(2.0)
-
-                    # 2. Activate magnet at cup position
-                    cmd2 = f"{cup_pos},1\n"
-                    esp32_serial.write(cmd2.encode())
-                    time.sleep(2.0)
-
-                    # 3. Go to lifting position (magnet on)
-                    cmd3 = f"{lift_pos},1\n"
-                    esp32_serial.write(cmd3.encode())
-                    time.sleep(2.0)
-
-                    # 4. Return to cup position (magnet on)
-                    cmd4 = f"{cup_pos},1\n"
-                    esp32_serial.write(cmd4.encode())
-                    time.sleep(2.0)
-
-                    # 5. Turn off magnet at cup position
-                    cmd5 = f"{cup_pos},0\n"
-                    esp32_serial.write(cmd5.encode())
-                    time.sleep(2.0)
-
-                    # 6. Return to home position
-                    home_cmd = "180,90,0,0\n"
-                    cmd6 = f"{lift_pos},0\n"
-                    esp32_serial.write(cmd6.encode())
-                    esp32_serial.write(home_cmd.encode())
+                    # ARM CONTROL: Use esp32_client instead of serial, run async in background
+                    asyncio.create_task(self.send_arm_sequence(cup_pos, lift_pos))
                     self.arm_command_sent = True
                     self.last_sent_cup = wantedCup
 
@@ -413,6 +389,28 @@ class GameSession:
             "processed_frame": processed_b64,
         }
         return resp
+
+    async def send_arm_sequence(self, cup_pos, lift_pos):
+        print(cup_pos)
+        print(lift_pos)
+        # Helper to send the arm sequence using esp32_client (async)
+        client = self.esp32_client if self.esp32_client is not None else esp32_client
+        if not client or not client.connected:
+            print("ESP32 client not connected, cannot send arm commands.")
+            return
+        await client.send_command(f"{cup_pos},0")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{cup_pos},1")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{lift_pos},1")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{cup_pos},1")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{cup_pos},0")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{lift_pos},0")
+        await client.send_command("180,90,0,0")
+        await asyncio.sleep(2.0)
 
     def get_stream_generator(self):
         """
