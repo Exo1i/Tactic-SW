@@ -58,12 +58,12 @@ class VideoStream:
         self.thread.join()
         self.cap.release()
 
-class GameSession:
-    def __init__(self, config):
-        self.esp32_client = config.get("esp32_client")  # Only use esp32_client
+class TargetShooter:
+    def __init__(self,config,esp32_client):
+        self.esp32_client = esp32_client  # Only use esp32_client
         self.webcam_ip = "http://192.168.49.1:4747/video" # Default if not provided
 
-        model_path_config = config.get("model_path", "games/TargetDetection/runs/detect/train/weights/best.pt")
+        model_path_config = "games/TargetDetection/runs/detect/train/weights/best.pt"
         backend_base_dir = os.path.join(os.path.dirname(__file__), "..")
         model_path_abs = os.path.join(backend_base_dir, model_path_config)
         if not os.path.exists(model_path_abs):

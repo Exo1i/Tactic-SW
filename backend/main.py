@@ -11,8 +11,8 @@ import asyncio
 
 # Import memory matching backend for color/yolo WebSocket endpoints
 from games.rubiks_cube_game import RubiksCubeGame
+from games.target_shooter_game import TargetShooter
 from fastapi.responses import StreamingResponse
-from games.target_shooter_game import GameSession  # Import GameSession for streaming
 from utils.esp32_client import esp32_client
 
 app = FastAPI()
@@ -115,6 +115,24 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 game_session = RubiksCubeGame(config, esp32_client=esp32_client)
             else:
                 game_session = RubiksCubeGame(esp32_client=esp32_client)
+        elif game_id == "target-shooter":
+             # Wait for initial config message (optional)
+            first_message = await websocket.receive()
+            config = None
+            first_frame_bytes = None
+            if "text" in first_message:
+                try: 
+                    config = json.loads(first_message["text"])
+                except Exception:
+                    config = None
+            elif "bytes" in first_message:
+                first_frame_bytes = first_message["bytes"]
+            if config is not None:
+                # Pass ESP32 client to the game
+                game_session = TargetShooter(config, esp32_client=esp32_client)
+                target_shooter_session = game_session
+            else:
+                game_session = TargetShooter(esp32_client=esp32_client)
         else:
             # Default: try to receive config as first message, else treat as frame
             first_message = await websocket.receive()
@@ -137,10 +155,6 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     game_session = game_module.GameSession(esp32_client=esp32_client)
                 except TypeError:
                     game_session = game_module.GameSession()
-
-        # Special handling for Target Shooter: store singleton for streaming
-        if game_id == "target-shooter":
-            target_shooter_session = game_session
 
     except Exception as e:
         await websocket.send_json({"status": "error", "message": f"Failed to load or initialize game: {str(e)}"})
