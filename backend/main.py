@@ -10,9 +10,9 @@ import serial  # Added for serial connection
 import asyncio
 
 # Import memory matching backend for color/yolo WebSocket endpoints
-from games.rubiks_cube_game import RubiksCubeGame
+# from games.rubiks_cube_game import RubiksCubeGame
 from fastapi.responses import StreamingResponse
-from games.target_shooter_game import GameSession  # Import GameSession for streaming
+# from games.target_shooter_game import GameSession  # Import GameSession for streaming
 from utils.esp32_client import esp32_client
 from games.memory_matching_backend import MemoryMatching  # Import MemoryMatching game class
 
@@ -45,7 +45,8 @@ GAME_MODULES = {
     "rubiks": "games.rubiks_cube_game",
     "target-shooter": "games.target_shooter_game",
     "color": "games.memory_matching_backend",  # Points to the module
-    "yolo": "games.memory_matching_backend",  # Points to the module
+    "yolo": "games.memory_matching_backend",   # Points to the module
+    "sorting-game": "games.sorting_game"       # Add our new sorting game module
 }
 
 # --- Global singleton for Target Shooter session (for demo/dev only) ---
@@ -137,11 +138,11 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                     config = None
             elif "bytes" in first_message:
                 first_frame_bytes = first_message["bytes"]
-            if config is not None:
-                # Pass ESP32 client to the game
-                game_session = RubiksCubeGame(config, esp32_client=esp32_client)
-            else:
-                game_session = RubiksCubeGame(esp32_client=esp32_client)
+            # if config is not None:
+            #     # Pass ESP32 client to the game
+            #     game_session = RubiksCubeGame(config, esp32_client=esp32_client)
+            # else:
+            #     game_session = RubiksCubeGame(esp32_client=esp32_client)
         else:
             # Default: try to receive config as first message, else treat as frame
             first_message = await websocket.receive()

@@ -7,6 +7,7 @@ const games = [
   { name: "Rubik's Game", id: "rubiks-game" },
   { name: "Memory Matching", id: "memory-matching" },
   { name: "Target Shooter", id: "shooting-game" },
+  { name: "Shape Sorting", id: "sorting-game" },
 ];
 
 export default function Home() {
