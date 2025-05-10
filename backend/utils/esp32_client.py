@@ -8,7 +8,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("esp32_client")
 
 class ESP32Client:
-    def __init__(self, esp_uri: str = "ws://192.168.1.19:80"):
+    def __init__(self, esp_uri: str = "ws://10.42.0.152:80"):
         self.esp_uri = esp_uri
         self.websocket = None
         self.connected = False
