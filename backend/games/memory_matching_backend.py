@@ -1,4 +1,3 @@
-
 import asyncio
 import base64
 import json
@@ -22,7 +21,7 @@ from utils.esp32_client import esp32_client as global_esp32_client_instance
 
 # --- Configuration ---
 # SERIAL_PORT and BAUD_RATE are no longer needed
-CAMERA_URL = 'http://192.168.49.1:8080/video' # Primary Camera URL
+CAMERA_URL = 'http://192.168.172.253:8080/video' # Primary Camera URL
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -353,7 +352,7 @@ async def from_to(websocket: WebSocket, src: str, dest: str, card_id: int) -> bo
     except Exception as ws_e:
         logging.error(f"Failed to send arm status update via WebSocket for {action_name}: {ws_e}")
 
-    logging.info(f"Arm movement finished for {action_name} (card {card_id}). Success: {move_successful}")
+    logging.info(f"Arm movement finished for {action_name} (card {id}). Success: {move_successful}")
     return move_successful
 
 # --- FastAPI App ---
@@ -811,7 +810,7 @@ async def run_yolo_game(websocket: WebSocket):
                     await update_frontend_state()
                 else:
                     logging.info(f"NO MATCH ('{obj1}' vs '{obj2}'). Returning {card1_id} from Temp1 & {card2_id} from Temp2.")
-                    await update_frontend_state(f"No match. Returning {card1_id}&{card2_id}.")
+                    await update_frontend_state(f"No match. Returning {card1_id} from Temp1 & {card2_id} from Temp2.")
                     success_ret1 = await from_to(websocket, "temp1", "card", card1_id)
                     success_ret2 = await from_to(websocket, "temp2", "card", card2_id)
                     if not (success_ret1 and success_ret2): logging.error(f"Failed returning one or both cards: {card1_id} (Success: {success_ret1}), {card2_id} (Success: {success_ret2})."); await update_frontend_state(f"Warning: Arm fail returning cards {card1_id}/{card2_id}.")
@@ -1084,178 +1083,8 @@ async def run_color_game(websocket: WebSocket):
         logging.info(f"[{game_state_key.upper()}] Runner finished cleanup.")
 
 
-# --- WebSocket Endpoint ---
-@app.websocket("/ws/{game_version}")
-async def websocket_endpoint(websocket: WebSocket, game_version: str):
-    # The global_esp32_client_instance is imported from utils.esp32_client
-    # This instance is managed (connected/closed) by main.py's startup/shutdown events.
-    if global_esp32_client_instance:
-        # Attach the global ESP32 client to this specific websocket session
-        # This makes it available to game runners via getattr(websocket, "esp32_client", None)
-        setattr(websocket, "esp32_client", global_esp32_client_instance)
-        logging.info(f"Attached global ESP32 client to WebSocket for {game_version}")
-    else:
-        logging.warning(f"Global ESP32 client not available for WebSocket {game_version}")
-        # Game can proceed, but arm control will fail if client remains None.
-        # Game runners should handle the client being None.
-        setattr(websocket, "esp32_client", None) # Explicitly set to None
-
-    client_ip = websocket.client.host if websocket.client else "unknown"
-    await websocket.accept()
-    logging.info(f"WebSocket connection accepted from {client_ip} for game version: '{game_version}'")
-
-    if game_version not in ["color", "yolo"]:
-        logging.error(f"Invalid game version '{game_version}' requested by {client_ip}.")
-        await websocket.send_json({"type": "error", "payload": f"Invalid game version '{game_version}'. Use 'color' or 'yolo'."})
-        await websocket.close(code=1008); return
-
-    lock = game_locks[game_version]
-    if lock.locked():
-        logging.warning(f"{game_version.capitalize()} game already in progress. Rejecting connection from {client_ip}.")
-        await websocket.send_json({"type": "error", "payload": f"{game_version.capitalize()} game is busy. Please try again later."})
-        await websocket.close(code=1008); return
-
-    acquired_lock, runner_task = False, None
-    try:
-        logging.info(f"Attempting to acquire lock for {game_version} game by {client_ip}...")
-        async with lock:
-            acquired_lock = True
-            logging.info(f"Lock acquired for {game_version} game by {client_ip}.")
-
-            # Serial setup is removed. ESP32 client is already on websocket.
-            # Check if the ESP32 client on the websocket is connected and ready
-            ws_esp32_client = getattr(websocket, "esp32_client", None)
-            if not ws_esp32_client or not ws_esp32_client.connected:
-                logging.warning(f"ESP32 client not connected for {game_version} game start ({client_ip}). Arm control might fail.")
-                # Optionally send a warning to the client
-                # await websocket.send_json({"type": "warning", "payload": "ESP32 arm controller not connected."})
-                # Game can still proceed without arm control if designed to.
-
-            active_games[game_version] = {"running": True} # Mark as active, runners will add more
-            if game_version == "yolo":
-                runner_task = asyncio.create_task(run_yolo_game(websocket))
-            elif game_version == "color":
-                runner_task = asyncio.create_task(run_color_game(websocket))
-            
-            logging.info(f"Game runner task created for {game_version} requested by {client_ip}.")
-
-            while True:
-                if runner_task.done():
-                    logging.info(f"{game_version} runner task finished for {client_ip}.")
-                    try: runner_task.result()
-                    except asyncio.CancelledError: logging.info(f"{game_version} runner task was cancelled for {client_ip}.")
-                    except Exception as runner_exception:
-                        logging.error(f"{game_version} runner task failed with exception: {runner_exception}", exc_info=True)
-                        if websocket.client_state == WebSocketState.CONNECTED:
-                            try: await websocket.send_json({"type": "error", "payload": f"Game ended due to server error."})
-                            except Exception as send_err: logging.error(f"Failed to send runner error to {client_ip}: {send_err}")
-                    break
-                if websocket.client_state != WebSocketState.CONNECTED:
-                    logging.info(f"WebSocket disconnected by client {client_ip}. Stopping runner for {game_version}.")
-                    if game_version in active_games: active_games[game_version]["running"] = False
-                    if runner_task and not runner_task.done(): runner_task.cancel()
-                    break
-                await asyncio.sleep(0.5)
-            logging.info(f"Monitor loop finished for {game_version} by {client_ip}. Lock scope ending.")
-    except WebSocketDisconnect:
-        logging.info(f"WebSocket disconnected abruptly by {client_ip} for {game_version}.")
-        if runner_task and not runner_task.done():
-            if game_version in active_games: active_games[game_version]["running"] = False
-            runner_task.cancel()
-    except Exception as e:
-        logging.error(f"Unexpected error in WebSocket endpoint for {game_version} ({client_ip}): {e}", exc_info=True)
-        if websocket.client_state == WebSocketState.CONNECTED:
-            try: await websocket.send_json({"type": "error", "payload": f"Server connection error: {e}"})
-            except Exception: pass
-        if runner_task and not runner_task.done():
-            if game_version in active_games: active_games[game_version]["running"] = False
-            runner_task.cancel()
-    finally:
-        logging.info(f"--- Cleaning up WebSocket endpoint for {game_version} ({client_ip}) ---")
-        if runner_task:
-            try:
-                if not runner_task.done():
-                    logging.warning(f"Runner task for {game_version} wasn't done, ensuring cancellation.")
-                    runner_task.cancel()
-                await asyncio.wait_for(runner_task, timeout=5.0)
-            except asyncio.CancelledError: logging.info(f"Runner task {game_version} cleanup confirmed cancelled.")
-            except asyncio.TimeoutError: logging.error(f"Timeout waiting for runner task {game_version} cleanup.")
-            except Exception as task_clean_e: logging.error(f"Error during final await of runner task {game_version}: {task_clean_e}")
-        
-        if game_version in active_games:
-            # Clear only specific fields related to this instance, esp32_client is global/passed
-            active_games[game_version].pop("running", None)
-            active_games[game_version].pop("esp32_client", None) # Remove instance-specific reference
-            active_games[game_version].pop("switch_command_sent", None)
-            # Check if active_games[game_version] is empty, then clear it fully.
-            if not active_games[game_version]:
-                 active_games[game_version] = {} # Reset state
-            logging.info(f"Cleared/reset active game state for {game_version}.")
-
-        # Serial port closing is removed. ESP32 client connection is managed by main.py.
-        if websocket.client_state != WebSocketState.DISCONNECTED:
-            try:
-                await websocket.close(code=1000)
-                logging.info(f"WebSocket connection closed gracefully for {client_ip}.")
-            except Exception as ws_close_e: logging.error(f"Error closing WebSocket for {client_ip}: {ws_close_e}")
-        if acquired_lock: logging.info(f"Lock released for {game_version} game by {client_ip}.")
-        logging.info(f"--- WebSocket Endpoint cleanup finished for {game_version} ({client_ip}) ---")
-
-
-# --- Static Files and Root Endpoint (No changes needed) ---
-frontend_dir = "build"; static_dir = os.path.join(frontend_dir, "static")
-if os.path.isdir(frontend_dir) and os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
-    logging.info(f"Serving static files from: {static_dir}")
-else: logging.warning(f"Static files directory not found: '{static_dir}'")
-
-@app.get("/")
-async def read_index():
-    index_path = os.path.join(frontend_dir, "index.html")
-    if os.path.exists(index_path): return FileResponse(index_path)
-    else: logging.error("index.html not found in build directory."); return {"error": "Frontend index.html not found."}
-
-@app.get("/{full_path:path}")
-async def catch_all(full_path: str):
-    if full_path.startswith(("static/", "ws/", "api/")): raise HTTPException(status_code=404, detail="Resource not found")
-    index_path = os.path.join(frontend_dir, "index.html")
-    if os.path.exists(index_path): return FileResponse(index_path)
-    else: logging.error("index.html not found for catch-all."); raise HTTPException(status_code=500, detail="Frontend index.html missing.")
-
-# --- Main Execution ---
-if __name__ == "__main__":
-    import uvicorn
-    if not os.path.exists(frontend_dir) or not os.path.exists(os.path.join(frontend_dir, "index.html")):
-        print("\n!!! WARNING: Frontend 'build' directory or 'build/index.html' not found! Please build frontend. !!!\n")
-    print("--- Starting Memory Matching Game Backend ---")
-    print(f"Access game: http://<your-server-ip>:8000")
-    # print(f"Using Serial Port: {SERIAL_PORT}") # Removed
-    print(f"ESP32 WebSocket URI (expected): {global_esp32_client_instance.esp_uri if global_esp32_client_instance else 'Not configured'}")
-    print(f"Using Camera URL: {CAMERA_URL}")
-    yolo_status = f"Found ({YOLO_MODEL_PATH})" if os.path.exists(YOLO_MODEL_PATH) else f"NOT FOUND ({YOLO_MODEL_PATH})"
-    print(f"YOLO Model Status: {yolo_status}")
-    print("---------------------------------------------")
-    # Note: main.py is responsible for uvicorn.run and ESP32 client connection management
-    # This __main__ block is for standalone running of memory_matching_backend.
-    # For integrated use, main.py's __main__ should be used.
-    # To run this standalone with ESP32, you'd need to manage the global_esp32_client_instance connection here.
-    # For simplicity, assuming it's run via the main.py which handles ESP32 client lifecycle.
-    
-    # Example of how main.py would run this (simplified):
-    # uvicorn.run("memory_matching_backend:app", host="0.0.0.0", port=8000, reload=False, log_level="info")
-    # And main.py would have:
-    # @app.on_event("startup") async def startup_event(): await global_esp32_client_instance.connect()
-    # @app.on_event("shutdown") async def shutdown_event(): await global_esp32_client_instance.close()
-    
-    # If running this file directly, the ESP32 client won't be automatically connected
-    # unless you add startup/shutdown events here or connect it manually.
-    # The provided main.py already handles this.
-    print("To run with full ESP32 integration, please run the main.py script.")
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True, log_level="info")
-
-
 # --- GameSession Adapter Class ---
-class GameSession:
+class MemoryMatching:
     def __init__(self, config=None, esp32_client=None): # Accepts esp32_client
         self.mode = "color"
         if config and isinstance(config, dict) and "mode" in config:
@@ -1263,7 +1092,22 @@ class GameSession:
                 self.mode = config["mode"]
         self._initialized = False
         self.esp32_client = esp32_client # Store the passed client
-
+        # Track if game is running (used by main.py)
+        self.running = False
+        # Game state tracking
+        self.game_state = {
+            "running": False,
+            "esp32_client": esp32_client,
+            "switch_command_sent": False,
+            "card_states": {},
+            "colors_found" if self.mode == "color" else "objects_found": {},
+            "pairs_found": 0,
+            "current_flipped_cards": [],
+            "last_detect_fail_id": None
+        }
+        # Add reference to game lock
+        self.game_lock = asyncio.Lock()
+        
     async def _ensure_init(self):
         global yolo_model_global
         if self.mode == "yolo" and yolo_model_global is None:
@@ -1336,17 +1180,33 @@ class GameSession:
         except Exception as e: return {"status": "error", "message": str(e)}
 
     async def run_game(self, websocket: WebSocket):
-        # This method is called by main.py's generic game endpoint
-        # It needs to pass the GameSession's esp32_client to the runners
-        # by attaching it to the websocket object.
-        if self.esp32_client:
-            setattr(websocket, "esp32_client", self.esp32_client)
-            logging.info(f"GameSession attached its ESP32 client to WebSocket for {self.mode} game.")
-        else:
-            setattr(websocket, "esp32_client", None) # Ensure it's set, even if None
-            logging.warning(f"GameSession has no ESP32 client for {self.mode} game. Arm control will fail.")
-
-        if self.mode == "yolo":
-            await run_yolo_game(websocket)
-        else: # Default to color
-            await run_color_game(websocket)
+        """Main entry point called by main.py's WebSocket endpoint"""
+        if self.game_lock.locked():
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_json({
+                    "type": "error", 
+                    "payload": f"{self.mode.capitalize()} game is busy. Please try again later."
+                })
+            return
+            
+        async with self.game_lock:
+            self.running = True
+            self.game_state["running"] = True
+            self.game_state["esp32_client"] = self.esp32_client
+            
+            # Set context on websocket for from_to function
+            setattr(websocket, 'game_version_context', self.mode)
+            
+            if self.mode == "yolo":
+                await run_yolo_game(websocket)
+            else: # Default to color
+                await run_color_game(websocket)
+            
+            self.running = False
+            self.game_state["running"] = False
+    
+    def stop(self):
+        """Called when the WebSocket disconnects"""
+        self.running = False
+        if "running" in self.game_state:
+            self.game_state["running"] = False
