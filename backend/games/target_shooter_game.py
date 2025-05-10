@@ -61,6 +61,7 @@ class VideoStream:
 class GameSession:
     def __init__(self, config):
         self.arduino = config.get("serial_instance")
+        self.esp32_client = config.get("esp32_client")  # Add this line
         self.webcam_ip = config.get("webcam_ip", "http://localhost:4747/video") # Default if not provided
 
         model_path_config = config.get("model_path", "games/TargetDetection/runs/detect/train/weights/best.pt")
@@ -107,12 +108,15 @@ class GameSession:
         self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
         self.video_stream = None
 
-        # Initial Arduino homing is done here, assuming serial is ready
+        # Initial Arduino/ESP32 homing is done here, assuming serial is ready
         if self.arduino:
             self.send_to_arduino(INIT_PAN, INIT_TILT)
             print("TargetShooter: Initialized and sent home command to Arduino.")
+        elif self.esp32_client:
+            asyncio.run(self.send_to_esp32(INIT_PAN, INIT_TILT))
+            print("TargetShooter: Initialized and sent home command to ESP32.")
         else:
-            print("TargetShooter: Arduino not available.")
+            print("TargetShooter: No hardware interface available.")
 
     async def manage_game_loop(self, websocket):
         self.websocket = websocket
@@ -268,6 +272,23 @@ class GameSession:
             print(f"Serial communication error: {e}")
             return False
 
+    async def send_to_esp32(self, pan_angle, tilt_angle, shoot_command=False):
+        if not self.esp32_client or not self.esp32_client.connected:
+            print("ESP32 not connected.")
+            return False
+        try:
+            if shoot_command:
+                cmd = {"cmd": "SHOOT"}
+            else:
+                cmd = {"cmd": "MOVE", "pan": int(round(pan_angle)), "tilt": int(round(tilt_angle))}
+            print(f"Sending to ESP32: {cmd}")
+            await self.esp32_client.send_json(cmd)
+            await asyncio.sleep(0.05)
+            return True
+        except Exception as e:
+            print(f"ESP32 communication error: {e}")
+            return False
+
     def wait_for_ack(self, timeout=2.0): # Using 2.0s timeout
         if self.arduino is None or not self.arduino.is_open:
             return False
@@ -382,6 +403,7 @@ class GameSession:
                 self.game_requested_stop = False # Crucial to reset this
                 self.last_balloon_detected_time = time.time() # Reset timeout timer
                 if self.arduino: self.send_to_arduino(INIT_PAN, INIT_TILT) # Re-home on new start
+                elif self.esp32_client: asyncio.run(self.send_to_esp32(INIT_PAN, INIT_TILT))
         elif action == "reset_shot_angles":
             self.shot_angles = []
             response_message = "Shot angles reset."
@@ -394,7 +416,9 @@ class GameSession:
             self.stop_event.set() # Signal all loops
             if self.arduino and self.arduino.is_open: # Immediate Arduino reset
                 self.send_to_arduino(INIT_PAN, INIT_TILT)
-            response_message = "Emergency stop: Arduino reset, game stopping."
+            elif self.esp32_client:
+                asyncio.run(self.send_to_esp32(INIT_PAN, INIT_TILT))
+            response_message = "Emergency stop: Hardware reset, game stopping."
         else:
             response_message = f"Unknown command: {action}"
         
@@ -502,6 +526,7 @@ class GameSession:
             print(status_message)
             self.game_over_due_to_timeout = True
             if self.arduino: self.send_to_arduino(INIT_PAN, INIT_TILT)
+            elif self.esp32_client: asyncio.run(self.send_to_esp32(INIT_PAN, INIT_TILT))
         
         if best_target and (current_time - self.last_movement_time) > MOVEMENT_COOLDOWN:
             self.last_movement_time = current_time
@@ -517,25 +542,44 @@ class GameSession:
                 
                 if not self._is_angle_already_shot(self.current_pan, self.current_tilt):
                     print(f"FIRE! at angles: Pan={self.current_pan:.1f}, Tilt={self.current_tilt:.1f}, Depth: {self.depth:.1f}cm")
-                    if self.send_to_arduino(self.current_pan, self.current_tilt, shoot_command=True):
+                    shoot_sent = False
+                    if self.arduino:
+                        shoot_sent = self.send_to_arduino(self.current_pan, self.current_tilt, shoot_command=True)
+                    elif self.esp32_client:
+                        asyncio.run(self.send_to_esp32(self.current_pan, self.current_tilt, shoot_command=True))
+                        shoot_sent = True
+                    if shoot_sent:
                         status_message = "SHOOT command sent."
-                        if self.wait_for_ack():
-                            status_message = "Balloon shot! ACK received."
+                        if self.arduino:
+                            if self.wait_for_ack():
+                                status_message = "Balloon shot! ACK received."
+                                self.shot_angles.append((self.current_pan, self.current_tilt))
+                                print("Returning to initial position...")
+                                self.current_pan, self.current_tilt = INIT_PAN, INIT_TILT
+                                self.send_to_arduino(self.current_pan, self.current_tilt)
+                                time.sleep(RETURN_TO_CENTER_DELAY)
+                                self.last_balloon_detected_time = time.time()
+                            else:
+                                status_message = "Shoot sent, but NO ACK. Retrying aim or hold."
+                        else:
+                            # For ESP32, assume success for now
                             self.shot_angles.append((self.current_pan, self.current_tilt))
                             print("Returning to initial position...")
                             self.current_pan, self.current_tilt = INIT_PAN, INIT_TILT
-                            self.send_to_arduino(self.current_pan, self.current_tilt)
+                            if self.esp32_client:
+                                asyncio.run(self.send_to_esp32(self.current_pan, self.current_tilt))
                             time.sleep(RETURN_TO_CENTER_DELAY)
                             self.last_balloon_detected_time = time.time()
-                        else:
-                            status_message = "Shoot sent, but NO ACK. Retrying aim or hold."
                     else:
                         status_message = "Failed to send SHOOT command."
             else:
                 new_pan, new_tilt = self._calculate_new_angles(error_x, error_y)
                 if abs(new_pan - self.current_pan) > 0.5 or abs(new_tilt - self.current_tilt) > 0.5:
                     self.current_pan, self.current_tilt = new_pan, new_tilt
-                    self.send_to_arduino(self.current_pan, self.current_tilt)
+                    if self.arduino:
+                        self.send_to_arduino(self.current_pan, self.current_tilt)
+                    elif self.esp32_client:
+                        asyncio.run(self.send_to_esp32(self.current_pan, self.current_tilt))
                     status_message = f"Moving: Pan={int(self.current_pan)} Tilt={int(self.current_tilt)}"
                 else:
                     status_message = "Target found, holding position."
@@ -575,6 +619,9 @@ class GameSession:
             if self.arduino and self.arduino.is_open:
                 self.send_to_arduino(INIT_PAN, INIT_TILT)
                 print("TargetShooter: Sent home command to Arduino on stop.")
+            elif self.esp32_client:
+                asyncio.run(self.send_to_esp32(INIT_PAN, INIT_TILT))
+                print("TargetShooter: Sent home command to ESP32 on stop.")
             
             print("TargetShooter: Stop sequence complete.")
         else:
