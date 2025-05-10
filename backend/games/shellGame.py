@@ -2,9 +2,37 @@ import cv2
 import numpy as np
 import base64
 import time
+import queue  # Add for frame streaming
+import threading
+
+# --- Threaded VideoStream class (copied from target_shooter_game) ---
+class VideoStream:
+    def __init__(self, src):
+        self.cap = cv2.VideoCapture(src)
+        self.ret, self.frame = self.cap.read()
+        self.stopped = False
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+
+    def update(self):
+        while not self.stopped:
+            ret, frame = self.cap.read()
+            with self.lock:
+                self.ret = ret
+                self.frame = frame
+
+    def read(self):
+        with self.lock:
+            return self.ret, self.frame.copy() if self.frame is not None else (False, None)
+
+    def release(self):
+        self.stopped = True
+        self.thread.join()
+        self.cap.release()
 
 # --- Hardcoded IP camera URL ---
-IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
+IPCAM_URL = "http://192.168.230.237:8080/video"  # <-- Change to your webcam's IP
 
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
@@ -60,29 +88,25 @@ class GameSession:
         self.last_moved_cup_idx = None
         self.last_ball_under_cup_idx = None
         self.stopped = False
-        self.cap = cv2.VideoCapture(IPCAM_URL)
+        self.video_stream = VideoStream(IPCAM_URL)
+        self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
         time.sleep(1)  # Give the IP camera time to initialize
 
     def stop(self):
         """Explicitly stop and release the camera."""
         if not self.stopped:
             self.stopped = True
-            if self.cap is not None:
-                self.cap.release()
-                self.cap = None
+            if self.video_stream is not None:
+                self.video_stream.release()
+                self.video_stream = None
 
     def get_ipcam_frame(self):
         if self.stopped:
             return None
-        if not self.cap or not self.cap.isOpened():
-            # Try to reopen if closed
-            self.cap = cv2.VideoCapture(IPCAM_URL)
-            # time.sleep(1)
-            if not self.cap.isOpened():
-                return None
-        # Flush buffer (optional, for IP cams)
-        for _ in range(2):
-            ret, frame = self.cap.read()
+        if not self.video_stream:
+            self.video_stream = VideoStream(IPCAM_URL)
+            time.sleep(1)
+        ret, frame = self.video_stream.read()
         if not ret or frame is None or frame.size == 0:
             return None
         return frame
@@ -288,6 +312,17 @@ class GameSession:
         raw_b64 = base64.b64encode(raw_jpg).decode("utf-8")
         processed_b64 = base64.b64encode(processed_jpg).decode("utf-8")
 
+        # --- STREAM: Put processed frame in queue for HTTP streaming ---
+        try:
+            if self.frame_queue.full():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.frame_queue.put_nowait(processed_b64)
+        except Exception as qerr:
+            print(f"ShellGame frame queue error: {qerr}")
+
         resp = {
             "status": "ok" if not self.game_ended else "ended",
             "ball_position": ball_position,
@@ -297,6 +332,29 @@ class GameSession:
             "processed_frame": processed_b64,
         }
         return resp
+
+    def get_stream_generator(self):
+        """
+        Yields multipart JPEG frames for HTTP streaming.
+        """
+        boundary = "frame"
+        while not self.stopped:
+            try:
+                b64_frame = self.frame_queue.get(timeout=2)
+                jpg_bytes = base64.b64decode(b64_frame)
+                yield (
+                    b"--%b\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: %d\r\n\r\n" % (boundary.encode(), len(jpg_bytes))
+                )
+                yield jpg_bytes
+                yield b"\r\n"
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"ShellGame stream generator error: {e}")
+                break
+        print("ShellGame stream generator exiting.")
 
     def __del__(self):
         self.stop()

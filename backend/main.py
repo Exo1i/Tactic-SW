@@ -160,6 +160,7 @@ GAME_MODULES = {
 
 # --- Global singleton for Target Shooter session (for demo/dev only) ---
 target_shooter_session = None
+shell_game_session = None  # Add global singleton for shell game
 
 @app.websocket("/ws/target-shooter")
 async def websocket_target_shooter(websocket: WebSocket):
@@ -215,6 +216,18 @@ async def stream_target_shooter(request: Request):
     generator = target_shooter_session.get_stream_generator()
     return StreamingResponse(generator, media_type="multipart/x-mixed-replace; boundary=frame")
 
+@app.get("/stream/shell-game")
+async def stream_shell_game(request: Request):
+    global shell_game_session
+    if not shell_game_session:
+        # Optionally, you could auto-create a session here, but better to require WS first
+        return StreamingResponse(
+            iter([b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"]),  # empty stream
+            media_type="multipart/x-mixed-replace; boundary=frame"
+        )
+    generator = shell_game_session.get_stream_generator()
+    return StreamingResponse(generator, media_type="multipart/x-mixed-replace; boundary=frame")
+
 @app.websocket("/ws/{game_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str):
     await websocket.accept()
@@ -229,7 +242,11 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
     try:
         game_module = importlib.import_module(module_path)
         
-        if game_id == "rubiks":
+        if game_id == "shell-game":
+            # Save singleton for streaming
+            shell_game_session = game_module.GameSession()
+            game_session = shell_game_session
+        elif game_id == "rubiks":
             # Wait for initial config message (optional)
             first_message = await websocket.receive()
             config = None
