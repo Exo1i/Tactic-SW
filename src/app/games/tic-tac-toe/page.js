@@ -27,8 +27,8 @@ export default function TicTacToePage() {
   // Tic Tac Toe arguments
   const [tttArgs, setTttArgs] = useState({
     model: "games/tic-tac-toe/data/model.h5",
-    zoom: 1.0,
-    check_interval: 5.0,
+    zoom: 0.5, // Changed from 1.0 to 0.5 for a wider view
+    check_interval: 10.0,
   });
   const [tttStarted, setTttStarted] = useState(false);
 
@@ -250,11 +250,14 @@ export default function TicTacToePage() {
             <input
               type="number"
               step="0.1"
-              min="1"
+              min="0.2" // Changed from 1 to 0.2 to allow smaller values
               value={tttArgs.zoom}
               onChange={e => setTttArgs(a => ({ ...a, zoom: parseFloat(e.target.value) }))}
               className="w-full p-2 border rounded"
             />
+            <small className="text-gray-500">
+              Lower values (0.2-0.5) show more of the paper, higher values zoom in.
+            </small>
           </div>
           <div className="mb-2">
             <label className="block mb-1">Check Interval (seconds):</label>

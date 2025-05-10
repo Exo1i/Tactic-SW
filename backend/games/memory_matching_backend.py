@@ -21,6 +21,22 @@ CAMERA_URL_DEFAULT = 'http://192.168.2.19:4747/video'
 YOLO_MODEL_PATH = "yolov5s.pt"
 
 # --- Game Constants ---
+import serial
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
+from starlette.websockets import WebSocketState
+from starlette.exceptions import HTTPException # Added for catch_all
+
+
+# --- Configuration ---
+SERIAL_PORT = '/dev/ttyUSB0'  # Adjust as needed (e.g., 'COM3' on Windows)
+BAUD_RATE = 9600
+CAMERA_URL = 'http://192.168.49.1:4747/video' # Primary Camera URL
+
+YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
+
+# --- Constants ---
 GRID_ROWS = 2
 GRID_COLS = 4
 CARD_COUNT = GRID_ROWS * GRID_COLS
