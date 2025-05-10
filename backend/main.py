@@ -14,6 +14,7 @@ from games.rubiks_cube_game import RubiksCubeGame
 from fastapi.responses import StreamingResponse
 from games.target_shooter_game import GameSession  # Import GameSession for streaming
 from utils.esp32_client import esp32_client
+from games.memory_matching_backend import MemoryMatching  # Import MemoryMatching game class
 
 app = FastAPI()
 
@@ -43,10 +44,6 @@ GAME_MODULES = {
     "tic-tac-toe": "games.tic-tac-toe.tictactoe",
     "rubiks": "games.rubiks_cube_game",
     "target-shooter": "games.target_shooter_game",
-    "game-2": "games.game2",
-    "game-3": "games.game3",
-    "game-4": "games.game4",
-    "game-5": "games.game5",
     "color": "games.memory_matching_backend",  # Points to the module
     "yolo": "games.memory_matching_backend",  # Points to the module
 }
@@ -55,6 +52,12 @@ GAME_MODULES = {
 target_shooter_session = None
 shell_game_session = None  # Add global singleton for shell game
 target_shooter_session = None
+
+# Store memory matching game instances - these will be lazily instantiated
+memory_game_instances = {
+    "color": None,  # Will be MemoryMatching instance
+    "yolo": None    # Will be MemoryMatching instance
+}
 
 @app.get("/stream/target-shooter")
 async def stream_target_shooter(request: Request):
@@ -81,7 +84,7 @@ async def stream_shell_game(request: Request):
 
 @app.websocket("/ws/{game_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str):
-    global target_shooter_session, shell_game_session
+    global target_shooter_session, shell_game_session, memory_game_instances
     await websocket.accept()
     game_session = None
     module_path = GAME_MODULES.get(game_id)
@@ -92,6 +95,29 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
         return
 
     try:
+        # Special handling for memory matching games (color/yolo)
+        if game_id in ["color", "yolo"]:
+            # Check if we need to create a new instance
+            if memory_game_instances[game_id] is None:
+                memory_game_instances[game_id] = MemoryMatching({"mode": game_id}, esp32_client=esp32_client)
+            
+            # Check if the game is already running
+            if memory_game_instances[game_id].running:
+                await websocket.send_json({
+                    "type": "error", 
+                    "payload": f"{game_id.capitalize()} game is busy. Please try again later."
+                })
+                await websocket.close()
+                return
+                
+            # Set ESP32 client on websocket for the game
+            setattr(websocket, "esp32_client", esp32_client)
+            
+            # Run the game - this will handle the entire lifecycle
+            await memory_game_instances[game_id].run_game(websocket)
+            return  # Important! Game handles its own lifecycle so we return here
+        
+        # Original code for other game types
         game_module = importlib.import_module(module_path)
         
         if game_id == "shell-game":

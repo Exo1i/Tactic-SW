@@ -72,7 +72,7 @@ export default function MemoryGame() {
 
         // Adjust protocol and hostname/port as needed
         const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-        const wsUrl = `${wsProtocol}${window.location.hostname}:8000/ws/memory-matching`; // Use centralized endpoint
+        const wsUrl = `${wsProtocol}${window.location.hostname}:8000/ws/${version}`; // Use centralized endpoint
         console.log(`Attempting to connect to: ${wsUrl}`);
         websocket.current = new WebSocket(wsUrl);
 
