@@ -32,7 +32,7 @@ class VideoStream:
         self.cap.release()
 
 # --- Hardcoded IP camera URL ---
-IPCAM_URL = "http://192.168.230.237:8080/video"  # <-- Change to your webcam's IP
+IPCAM_URL = "http://192.168.49.106:8080/video"  # <-- Change to your webcam's IP
 
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
@@ -260,6 +260,17 @@ class GameSession:
             cup_ellipses.append((center, axes, angle))
             valid_boxes.append((x, y, w, h))
 
+        # --- Determine cup positions (left/middle/right) ---
+        cup_positions = []
+        for i, (x, y, w, h) in enumerate(valid_boxes):
+            center_x = int(x + w/2)
+            cup_positions.append((center_x, i))
+        cup_positions_sorted = sorted(cup_positions, key=lambda tup: tup[0])
+        cup_names = ["left", "middle", "right"]
+        cup_idx_to_name = {}
+        for idx, (_, i) in enumerate(cup_positions_sorted):
+            cup_idx_to_name[i] = cup_names[idx]
+
         for i, (x, y, w, h) in enumerate(valid_boxes):
             center = (int(x + w/2), int(y + h/2))
             axes = (int(w/2), int(h/2))
@@ -275,17 +286,7 @@ class GameSession:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
         if not self.game_paused and not self.game_ended:
-            cup_positions = []
-            for i, (x, y, w, h) in enumerate(valid_boxes):
-                center_x = int(x + w/2)
-                cup_positions.append((center_x, i))
-            cup_positions_sorted = sorted(cup_positions, key=lambda tup: tup[0])
-            cup_names = ["Left Cup", "Middle Cup", "Right Cup"]
-            cup_idx_to_name = {}
-            for idx, (_, i) in enumerate(cup_positions_sorted):
-                cup_idx_to_name[i] = cup_names[idx]
-
-            current_ball_cup_idx = self.check_ball_under_cup(ball_position, cup_ellipses)
+            current_ball_cup_idx = self.check_ball_under_cup(self.ball_position, cup_ellipses)
             if current_ball_cup_idx is not None:
                 x, y, w, h = [int(v) for v in valid_boxes[current_ball_cup_idx]]
                 center = (int(x + w/2), int(y + h/2))
@@ -294,6 +295,7 @@ class GameSession:
                 cv2.putText(frame, f"{name} (Ball!)", (center[0] - 60, center[1] - max(axes) - 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 cv2.ellipse(frame, center, axes, 0, 0, 360, (0, 255, 255), 3)
+                print(name)  # <-- Print the cup name to the terminal
 
         if success and not self.game_paused:
             ball_under_cup_idx = self.check_ball_under_cup(ball_position, cup_ellipses)
