@@ -10,7 +10,6 @@ import serial  # Added for serial connection
 import asyncio
 
 # Import memory matching backend for color/yolo WebSocket endpoints
-from games.memory_matching_backend import MemoryMatching
 from games.rubiks_cube_game import RubiksCubeGame
 from fastapi.responses import StreamingResponse
 from games.target_shooter_game import GameSession  # Import GameSession for streaming
@@ -38,112 +37,6 @@ if TARGET_SHOOTER_DIR not in sys.path:  # Add games directory itself for broader
 if MEMORY_DIR not in sys.path:
     sys.path.insert(0, MEMORY_DIR)
 
-
-# Global application settings and hardware resources
-app_settings = {
-    "webcam_ip": "http://192.168.49.1:4747/video",  # Default Webcam IP
-    "serial_config": {
-        "type": "usb",  # "usb" or "wifi"
-        "path": "COM7",  # For USB: e.g., COM3 (Windows), /dev/ttyUSB0 (Linux)
-        "baudrate": 9600,  # For USB
-        "host": "192.168.1.100",  # For WiFi
-        "port": 8888,  # For WiFi
-    }
-}
-serial_connection_instance = None
-
-def initialize_serial_connection():
-    global serial_connection_instance, app_settings
-    if serial_connection_instance and serial_connection_instance.is_open:
-        try:
-            serial_connection_instance.close()
-        except Exception as e:
-            print(f"Error closing existing serial connection: {e}")
-    serial_connection_instance = None
-
-    config = app_settings["serial_config"]
-    print(f"Attempting to initialize serial connection with config: {config}")
-    try:
-        if config["type"] == "usb":
-            serial_connection_instance = serial.Serial(
-                config["path"],
-                config["baudrate"],
-                timeout=1
-            )
-            print(f"USB Serial connection established to {config['path']} at {config['baudrate']}")
-        elif config["type"] == "wifi":
-            # PySerial can connect to socket URLs for TCP-to-Serial bridges
-            socket_url = f"socket://{config['host']}:{config['port']}"
-            serial_connection_instance = serial.serial_for_url(socket_url, timeout=1)
-            print(f"WiFi Serial connection established to {config['host']}:{config['port']}")
-        else:
-            print(f"Unsupported serial type: {config['type']}")
-            return False
-        
-        if serial_connection_instance.is_open:
-            print("Serial connection successfully opened.")
-            # Optional: Send a handshake or test command here if your devices expect one
-            # For example, wait for Arduino to reset if it's a direct USB connection
-            if config["type"] == "usb":
-                import time
-                time.sleep(2)  # Wait for Arduino to reset
-            return True
-        else:
-            print("Serial port opened but test failed (not is_open).")
-            serial_connection_instance = None  # Ensure it's None if not truly open
-            return False
-
-    except serial.SerialException as e:
-        print(f"Serial Error ({config['type']}): {e}")
-        serial_connection_instance = None
-        return False
-    except Exception as e:
-        print(f"Unexpected error initializing serial ({config['type']}): {e}")
-        serial_connection_instance = None
-        return False
-
-@app.on_event("startup")
-async def startup_event():
-    initialize_serial_connection()
-    # Initialize Memory Matching's YOLO model path if it's used globally (optional, or handle in its GameSession)
-    # memory_matching_backend.YOLO_MODEL_PATH is now a constant, can be referenced.
-    # If memory_matching_backend needs its own startup actions (like loading global model),
-    # they would need to be callable functions. For now, GameSession will handle its own model.
-
-@app.get("/api/settings")
-async def get_settings():
-    return app_settings
-
-@app.post("/api/settings")
-async def update_settings(new_settings: dict):
-    global app_settings
-    # Basic validation/merging
-    if "webcam_ip" in new_settings:
-        app_settings["webcam_ip"] = new_settings["webcam_ip"]
-    if "serial_config" in new_settings:
-        # Ensure all required sub-keys are present or use defaults
-        current_serial_config = app_settings["serial_config"]
-        updated_serial_config = new_settings["serial_config"]
-        
-        app_settings["serial_config"]["type"] = updated_serial_config.get("type", current_serial_config["type"])
-        app_settings["serial_config"]["path"] = updated_serial_config.get("path", current_serial_config["path"])
-        # Ensure baudrate is int
-        try:
-            app_settings["serial_config"]["baudrate"] = int(updated_serial_config.get("baudrate", current_serial_config["baudrate"]))
-        except ValueError:
-            app_settings["serial_config"]["baudrate"] = current_serial_config["baudrate"]  # fallback
-            
-        app_settings["serial_config"]["host"] = updated_serial_config.get("host", current_serial_config["host"])
-         # Ensure port is int
-        try:
-            app_settings["serial_config"]["port"] = int(updated_serial_config.get("port", current_serial_config["port"]))
-        except ValueError:
-            app_settings["serial_config"]["port"] = current_serial_config["port"]  # fallback
-
-    print(f"Updated settings: {app_settings}")
-    initialize_serial_connection()  # Re-initialize with new settings
-    return {"message": "Settings updated", "current_settings": app_settings}
-
 # Map game_id to module path
 GAME_MODULES = {
     "shell-game": "games.shellGame",
@@ -161,52 +54,10 @@ GAME_MODULES = {
 # --- Global singleton for Target Shooter session (for demo/dev only) ---
 target_shooter_session = None
 shell_game_session = None  # Add global singleton for shell game
-
-@app.websocket("/ws/target-shooter")
-async def websocket_target_shooter(websocket: WebSocket):
-    global target_shooter_session
-    await websocket.accept()
-    # Choose hardware interface based on config
-    serial_type = app_settings["serial_config"].get("type", "usb")
-    game_launch_config = {
-        "webcam_ip": app_settings["webcam_ip"],
-        "model_path": "games/TargetDetection/runs/detect/train/weights/best.pt"
-    }
-    if serial_type == "usb":
-        game_launch_config["serial_instance"] = serial_connection_instance
-    elif serial_type == "wifi":
-        game_launch_config["esp32_client"] = esp32_client
-
-    first_message_data = await websocket.receive()
-    client_initial_command_data = None
-    if "text" in first_message_data:
-        try:
-            parsed_text = json.loads(first_message_data["text"])
-            if isinstance(parsed_text, dict):
-                client_initial_command_data = parsed_text
-                game_launch_config.update(client_initial_command_data)
-        except Exception as e:
-            await websocket.send_json({"status": "error", "message": f"Invalid initial JSON config: {str(e)}"})
-            await websocket.close(); return
-    else:
-        await websocket.send_json({"status": "error", "message": "Expected initial JSON config as text."})
-        await websocket.close(); return
-
-    try:
-        target_shooter_session = GameSession(game_launch_config)
-    except Exception as e:
-        await websocket.send_json({"status": "error", "message": f"Error initializing game session: {str(e)}"})
-        await websocket.close(); return
-
-    if client_initial_command_data and client_initial_command_data.get("action") == "initial_config":
-        target_shooter_session.process_command(client_initial_command_data)
-
-    await target_shooter_session.manage_game_loop(websocket)
-    # When manage_game_loop returns, session is stopped
+target_shooter_session = None
 
 @app.get("/stream/target-shooter")
 async def stream_target_shooter(request: Request):
-    global target_shooter_session
     if not target_shooter_session:
         # Optionally, you could auto-create a session here, but better to require WS first
         return StreamingResponse(
@@ -230,6 +81,7 @@ async def stream_shell_game(request: Request):
 
 @app.websocket("/ws/{game_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str):
+    global target_shooter_session, shell_game_session
     await websocket.accept()
     game_session = None
     module_path = GAME_MODULES.get(game_id)
@@ -277,16 +129,19 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             if config is not None:
                 # Pass ESP32 client to the game if the class accepts it
                 try:
-                    # Check if the GameSession class accepts esp32_client parameter
                     game_session = game_module.GameSession(config, esp32_client=esp32_client)
                 except TypeError:
-                    # If it doesn't accept esp32_client, use the original constructor
                     game_session = game_module.GameSession(config)
             else:
                 try:
                     game_session = game_module.GameSession(esp32_client=esp32_client)
                 except TypeError:
                     game_session = game_module.GameSession()
+
+        # Special handling for Target Shooter: store singleton for streaming
+        if game_id == "target-shooter":
+            target_shooter_session = game_session
+
     except Exception as e:
         await websocket.send_json({"status": "error", "message": f"Failed to load or initialize game: {str(e)}"})
         await websocket.close()
