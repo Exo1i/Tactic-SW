@@ -24,7 +24,7 @@ class GameSession:
         # Game state variables
         self.board_detected = False
         self.warped_board = None
-        self.grid_shapes = [["Circle" for _ in range(4)] for _ in range(2)]  # Changed default from None to "Circle"
+        self.grid_shapes = [["Unknown" for _ in range(4)] for _ in range(2)]  # Default is Unknown
         self.required_swaps = []
         self.current_move = None
         self.game_completed = False
@@ -252,12 +252,12 @@ class GameSession:
     def detect_shapes(self, warped_board):
         """Detect shapes in a 2x4 grid on the warped board (which is now tightly fit to the board)."""
         if warped_board is None:
-            return [["Circle" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)], None
+            return [["Unknown" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)], None
 
         board_height, board_width = warped_board.shape[:2]
         cell_width = board_width // self.GRID_COLS
         cell_height = board_height // self.GRID_ROWS
-        shapes_grid = [["Circle" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
+        shapes_grid = [["Unknown" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
 
         display_grid = warped_board.copy()
 
@@ -290,7 +290,7 @@ class GameSession:
                         )
 
                         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        shape = "Unknown"
+                        shape = "Unknown"  # Default to Unknown
                         max_area = 0
                         best_contour = None
 
@@ -316,10 +316,13 @@ class GameSession:
                             else:
                                 # Circle detection requires more careful handling
                                 if len(best_contour) > 5:
-                                    # Check circularity using area/perimeter ratio
-                                    circularity = 4 * np.pi * area / (peri * peri)
-                                    if circularity > 0.7:  # Higher value means more circular
+                                    circularity = 4 * np.pi * max_area / (peri * peri)
+                                    if circularity > 0.7:
                                         shape = "Circle"
+                                    else:
+                                        shape = "Unknown"
+                                else:
+                                    shape = "Unknown"
 
                             # Draw shape label on display grid
                             label_x = x1 + (x2 - x1) // 3
@@ -330,7 +333,7 @@ class GameSession:
                         shapes_grid[i][j] = shape
 
         return shapes_grid, display_grid
-    
+
     def determine_swaps(self, grid):
         """Determine necessary swaps to make bottom row match top row."""
         if grid is None or len(grid) != 2 or len(grid[0]) != self.GRID_COLS:
@@ -439,23 +442,20 @@ class GameSession:
                     # Detect shapes in warped board
                     self.grid_shapes, warped_display = self.detect_shapes(self.warped_board)
                     self.board_detected = True
-                    
-                    # Determine the required swaps if game is started
+
+                    # Always update required_swaps after detection
+                    self.required_swaps = self.determine_swaps(self.grid_shapes)
+
+                    # If game is started and not completed, update status and check completion
                     if self.game_started and not self.game_completed:
-                        new_swaps = self.determine_swaps(self.grid_shapes)
-                        
-                        # Update required swaps if they change
-                        if new_swaps != self.required_swaps:
-                            self.required_swaps = new_swaps
-                            if len(self.required_swaps) > 0:
-                                self.status_message = f"Detected {len(self.required_swaps)} swaps needed"
+                        if len(self.required_swaps) > 0:
+                            self.status_message = f"Detected {len(self.required_swaps)} swaps needed"
+                        else:
+                            if self.check_game_completion():
+                                self.game_completed = True
+                                self.status_message = "Game completed! All shapes match."
                             else:
-                                # Check if we've actually completed the game
-                                if self.check_game_completion():
-                                    self.game_completed = True
-                                    self.status_message = "Game completed! All shapes match."
-                                else:
-                                    self.status_message = "No swaps detected, but shapes don't match yet."
+                                self.status_message = "No swaps detected, but shapes don't match yet."
             else:
                 self.board_detected = False
                 self.warped_board = None
@@ -499,7 +499,7 @@ class GameSession:
                 "game_started": self.game_started,
                 "game_completed": self.game_completed,
                 "status_message": self.status_message,
-                "grid_shapes": self.grid_shapes if self.grid_shapes else [["Circle"] * 4, ["Circle"] * 4],
+                "grid_shapes": self.grid_shapes if self.grid_shapes else [["Unknown"] * 4, ["Unknown"] * 4],
                 "required_swaps": self.required_swaps,
                 "current_move": self.current_move
             }
@@ -524,7 +524,15 @@ class GameSession:
                 
                 self.game_started = True
                 self.game_completed = False
-                self.status_message = "Game started! Analyzing shapes..."
+                # Calculate swaps immediately on game start
+                self.required_swaps = self.determine_swaps(self.grid_shapes)
+                if self.check_game_completion():
+                    self.game_completed = True
+                    self.status_message = "Game started! Board already solved."
+                elif len(self.required_swaps) > 0:
+                    self.status_message = f"Game started! {len(self.required_swaps)} swaps needed."
+                else:
+                    self.status_message = "Game started! Shapes appear in order or no valid swaps found."
                 return {"status": "ok", "message": "Game started"}
                 
             elif action == "reset_game":
@@ -532,8 +540,7 @@ class GameSession:
                 self.game_completed = False
                 self.required_swaps = []
                 self.current_move = None
-                # Update default shape to Circle
-                self.grid_shapes = [["Circle" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
+                self.grid_shapes = [["Unknown" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
                 self.status_message = "Game reset. Position the board to start again."
                 return {"status": "ok", "message": "Game reset"}
                 
@@ -587,7 +594,7 @@ class GameSession:
                     "game_started": self.game_started,
                     "game_completed": self.game_completed,
                     "status_message": self.status_message,
-                    "grid_shapes": self.grid_shapes if self.grid_shapes else [["Circle"] * 4, ["Circle"] * 4],
+                    "grid_shapes": self.grid_shapes if self.grid_shapes else [["Unknown"] * 4, ["Unknown"] * 4],
                     "required_swaps": self.required_swaps,
                     "current_move": self.current_move
                 }
