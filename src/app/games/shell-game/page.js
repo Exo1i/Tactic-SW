@@ -210,33 +210,37 @@ export default function ShellGamePage() {
     );
 
   return (
-    <div className="flex flex-col items-center gap-4 p-4 min-h-screen bg-gradient-to-br from-gray-100 to-gray-300">
+    <div className="flex flex-col items-center gap-4 p-4 min-h-screen bg-gradient-to-br from-blue-100 via-white to-green-100">
       <SettingsModal />
-      <div className="w-full max-w-4xl bg-white rounded-xl shadow-lg p-6 mt-4">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-4">
-          <h1 className="text-2xl font-bold mb-2 md:mb-0">Shell Game</h1>
+      <div className="w-full max-w-5xl bg-white rounded-2xl shadow-2xl p-8 mt-4 border border-gray-200">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <h1 className="text-3xl font-extrabold tracking-tight text-blue-900 drop-shadow">
+              Shell Game
+            </h1>
+          </div>
           <div className="flex items-center gap-4">
             <span
-              className={`px-2 py-1 rounded text-xs ${
+              className={`px-2 py-1 rounded font-semibold text-xs shadow ${
                 status === "Connected"
-                  ? "bg-green-100 text-green-700"
+                  ? "bg-green-100 text-green-700 border border-green-300"
                   : status === "Disconnected"
-                  ? "bg-red-100 text-red-700"
-                  : "bg-yellow-100 text-yellow-700"
+                  ? "bg-red-100 text-red-700 border border-red-300"
+                  : "bg-yellow-100 text-yellow-700 border border-yellow-300"
               }`}
             >
               {status}
             </span>
             <button
               onClick={() => setShowSettings(true)}
-              className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+              className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 shadow transition"
             >
               Camera Settings
             </button>
             {!isGameStarted ? (
               <button
                 onClick={() => setIsGameStarted(true)}
-                className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700"
+                className="px-3 py-1 bg-green-600 text-white rounded hover:bg-green-700 shadow transition"
               >
                 Start Game
               </button>
@@ -248,8 +252,9 @@ export default function ShellGamePage() {
                   setOutput(null);
                   setRawFrame(null);
                   setProcessedFrame(null);
+                  setCupResult(null);
                 }}
-                className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
+                className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 shadow transition"
               >
                 Stop Game
               </button>
@@ -267,12 +272,13 @@ export default function ShellGamePage() {
             Warning: Device camera access requires HTTPS in most browsers.
           </div>
         )}
-        <div className="grid grid-cols-1 md:grid-cols-3">
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
           <div className="flex flex-col items-center">
-            <div className="mb-2 text-center font-medium">
-              Live Cam Preview
+            <div className="mb-2 text-center font-semibold text-blue-800">
+              📷 Live Cam Preview
             </div>
-            <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center">
+            <div className="relative w-[320px] h-[240px] rounded-xl overflow-hidden border-2 border-blue-200 bg-black flex items-center justify-center shadow-lg">
               {livefeedFrame ? (
                 <img
                   src={livefeedFrame}
@@ -280,6 +286,8 @@ export default function ShellGamePage() {
                   height={240}
                   alt="Livefeed Frame"
                   className="object-contain"
+                  draggable={false}
+                  style={{ userSelect: "none" }}
                 />
               ) : (
                 <span className="text-gray-400">No livefeed</span>
@@ -288,8 +296,10 @@ export default function ShellGamePage() {
           </div>
 
           <div className="flex flex-col items-center">
-            <div className="mb-2 text-center font-medium">Processed Frame</div>
-            <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center">
+            <div className="mb-2 text-center font-semibold text-green-800">
+              🕵️‍♂️ Processed Frame
+            </div>
+            <div className="relative w-[320px] h-[240px] rounded-xl overflow-hidden border-2 border-green-200 bg-black flex items-center justify-center shadow-lg">
               {processedStreamUrl ? (
                 <img
                   src={processedStreamUrl}
@@ -297,22 +307,50 @@ export default function ShellGamePage() {
                   height={240}
                   alt="Processed Stream"
                   className="object-contain"
-                  style={{ background: "#222" }}
+                  draggable={false}
+                  style={{ background: "#222", userSelect: "none" }}
                 />
               ) : (
                 <span className="text-gray-400">No frame</span>
               )}
             </div>
           </div>
-        </div>
-        {cupResult && (
-          <div className="mt-6 p-4 bg-green-100 border border-green-400 rounded-lg text-center text-xl font-bold text-green-800 animate-pulse">
-            🎉 The ball is under the <span className="uppercase">{cupResult}</span> cup!
+
+          <div className="flex flex-col items-center">
+            <div className="mb-2 text-center font-semibold text-purple-800">
+              🏆 Game Status
+            </div>
+            <div className="relative w-full min-h-[120px] rounded-xl bg-gradient-to-t from-purple-50 to-purple-100 border-2 border-purple-200 flex flex-col justify-center items-center p-4 shadow-inner">
+              {cupResult ? (
+                <div className="flex flex-col items-center">
+                  <span className="text-4xl mb-2 animate-bounce">🎉</span>
+                  <span className="text-2xl font-bold text-purple-900">
+                    The ball is under the{" "}
+                    <span className="uppercase underline decoration-wavy decoration-pink-500">
+                      {cupResult}
+                    </span>{" "}
+                    cup!
+                  </span>
+                </div>
+              ) : (
+                <span className="text-gray-500 text-lg">
+                  {debugState?.status === "waiting"
+                    ? "Waiting for cups to be detected..."
+                    : "Game in progress…"}
+                </span>
+              )}
+            </div>
           </div>
-        )}
-        <div className="mt-6 p-4 bg-gray-50 rounded-lg border">
-          <h3 className="text-lg font-medium mb-2">Game Data</h3>
-          <pre className="text-sm overflow-x-auto">
+        </div>
+
+        <div className="mt-8 p-4 bg-gray-50 rounded-lg border border-gray-200 shadow-inner">
+          <h3 className="text-lg font-semibold mb-2 text-gray-700 flex items-center gap-2">
+            <span>Game Data</span>
+            <span className="text-xs bg-gray-200 px-2 py-0.5 rounded text-gray-600">
+              Debug
+            </span>
+          </h3>
+          <pre className="text-sm overflow-x-auto whitespace-pre-wrap break-words max-h-56">
             {debugState ? JSON.stringify(debugState, null, 2) : "No data"}
           </pre>
         </div>
