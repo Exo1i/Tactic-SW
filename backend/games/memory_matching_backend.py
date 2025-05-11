@@ -5,6 +5,7 @@ import logging
 import random
 # import threading # No longer needed for serial_lock
 import time
+import threading  # Added for VideoStream
 from typing import Dict, Any, Optional, List, Tuple
 import os # Added for path checking
 
@@ -21,7 +22,7 @@ from utils.esp32_client import esp32_client as global_esp32_client_instance
 
 # --- Configuration ---
 # SERIAL_PORT and BAUD_RATE are no longer needed
-CAMERA_URL = 'http://192.168.137.252:4747/video' # Primary Camera URL
+CAMERA_URL = 'http://192.168.109.185:4747/video' # Primary Camera URL
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -78,6 +79,7 @@ frame_lock = asyncio.Lock()
 active_games: Dict[str, Dict[str, Any]] = {"color": {}, "yolo": {}}
 game_locks: Dict[str, asyncio.Lock] = { "color": asyncio.Lock(), "yolo": asyncio.Lock() }
 yolo_model_global = None
+video_streams = {}  # Store active video streams by game_version
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -439,73 +441,165 @@ def transform_board(frame: np.ndarray, corners: np.ndarray) -> Optional[np.ndarr
         return warped
     except Exception as e: logging.error(f"Error during perspective transform: {e}"); return None
 
-# --- Camera Capture (No changes needed regarding ESP32 client) ---
+# --- VideoStream class for optimized camera capture ---
+class VideoStream:
+    def __init__(self, src):
+        self.cap = cv2.VideoCapture(src)
+        self.ret, self.frame = self.cap.read()
+        self.stopped = False
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+
+    def update(self):
+        while not self.stopped:
+            ret, frame = self.cap.read()
+            with self.lock:
+                self.ret = ret
+                self.frame = frame
+
+    def read(self):
+        with self.lock:
+            return self.ret, self.frame.copy() if self.frame is not None else (False, None)
+
+    def release(self):
+        self.stopped = True
+        self.thread.join()
+        self.cap.release()
+
+# --- Camera Capture with optimized VideoStream ---
 async def capture_frames(websocket: WebSocket, camera_source: str, game_version: str):
     global latest_frame, latest_transformed_frame
-    cap = None
+    video_stream = None
     logging.info(f"Starting frame capture task for {game_version} from {camera_source}")
-    frame_count = 0; last_log_time = time.time()
-    while game_version in active_games and active_games[game_version].get("running"):
-        processed_frame_for_send, warped_board_for_send, corners = None, None, None
-        try:
-            if cap is None or not cap.isOpened():
-                logging.info(f"Attempting to open camera source: {camera_source}")
-                cap = cv2.VideoCapture(camera_source); await asyncio.sleep(1.5)
-                if not cap.isOpened():
-                    logging.error(f"Cannot open camera: {camera_source}. Retrying in 5s.")
-                    cap = None
-                    if websocket.client_state == WebSocketState.CONNECTED:
-                        try: await websocket.send_json({"type": "error", "payload": f"Cannot open camera: {camera_source}"})
-                        except Exception: pass
-                    await asyncio.sleep(5); continue
-                else:
-                    logging.info(f"Camera {camera_source} opened successfully.")
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, YOLO_FRAME_WIDTH)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, YOLO_FRAME_HEIGHT)
-                    logging.info(f"Camera properties set (attempted): {YOLO_FRAME_WIDTH}x{YOLO_FRAME_HEIGHT}")
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                logging.warning("Failed to grab frame. Releasing and retrying...")
-                if cap is not None: cap.release(); cap = None
-                async with frame_lock: latest_frame, latest_transformed_frame = None, None
-                await asyncio.sleep(1); continue
-            frame_count += 1; current_frame_copy = frame.copy()
-            local_latest_transformed = None
-            corners = find_board_corners(current_frame_copy)
-            if corners is not None:
-                warped = transform_board(current_frame_copy, corners)
-                if warped is not None:
-                    local_latest_transformed = warped; warped_board_for_send = warped
-            async with frame_lock: latest_frame = current_frame_copy; latest_transformed_frame = local_latest_transformed
-            processed_frame_for_send = current_frame_copy; timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            cv2.putText(processed_frame_for_send, timestamp, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(processed_frame_for_send, f"Mode: {game_version.upper()}", (processed_frame_for_send.shape[1] - 150, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1, cv2.LINE_AA)
-            if corners is not None: cv2.polylines(processed_frame_for_send, [np.int32(corners)], isClosed=True, color=(0, 255, 255), thickness=2)
-            encode_param = [cv2.IMWRITE_JPEG_QUALITY, 75]
-            ret_main, buffer_main = cv2.imencode('.jpg', processed_frame_for_send, encode_param)
-            jpg_main_as_text = base64.b64encode(buffer_main).decode('utf-8') if ret_main else None
-            jpg_transformed_as_text = None
-            if warped_board_for_send is not None:
-                ret_trans, buffer_trans = cv2.imencode('.jpg', warped_board_for_send, encode_param)
-                if ret_trans: jpg_transformed_as_text = base64.b64encode(buffer_trans).decode('utf-8')
+    frame_count = 0
+    last_log_time = time.time()
+    
+    try:
+        # Initialize the threaded video stream
+        logging.info(f"Initializing VideoStream for {camera_source}")
+        video_stream = VideoStream(camera_source)
+        video_streams[game_version] = video_stream
+        
+        # Give stream time to initialize
+        await asyncio.sleep(1.5)
+        
+        # Check if stream is open
+        ret, _ = video_stream.read()
+        if not ret:
+            logging.error(f"Cannot open camera: {camera_source}. VideoStream initialization failed.")
             if websocket.client_state == WebSocketState.CONNECTED:
-                if jpg_main_as_text:
-                    payload = {"frame": jpg_main_as_text}
-                    if jpg_transformed_as_text: payload["transformed_frame"] = jpg_transformed_as_text
-                    await websocket.send_json({"type": "frame_update", "payload": payload})
-                else: logging.warning("Skipping send: main frame encoding failed.")
-            else: logging.warning("WS closed in capture loop."); break
-            current_time = time.time()
-            if current_time - last_log_time >= 5.0:
-                fps = frame_count / (current_time - last_log_time); logging.info(f"Camera FPS: {fps:.2f}"); frame_count = 0; last_log_time = current_time
-            await asyncio.sleep(0.035)
-        except WebSocketDisconnect: logging.info(f"WS disconnected gracefully in capture loop."); break
-        except Exception as e: logging.error(f"Error in frame capture loop for {game_version}: {e}", exc_info=True); await asyncio.sleep(1)
-    if cap is not None:
-        try: cap.release(); logging.info(f"Camera released for {game_version}.")
-        except Exception as e: logging.error(f"Error releasing camera for {game_version}: {e}")
-    async with frame_lock: latest_frame, latest_transformed_frame = None, None
-    logging.info(f"Frame capture task stopped for {game_version}.")
+                try:
+                    await websocket.send_json({"type": "error", "payload": f"Cannot open camera: {camera_source}"})
+                except Exception:
+                    pass
+            return
+            
+        logging.info(f"Camera {camera_source} opened successfully via VideoStream.")
+        
+        # Set camera properties (these might not take effect with some camera sources)
+        video_stream.cap.set(cv2.CAP_PROP_FRAME_WIDTH, YOLO_FRAME_WIDTH)
+        video_stream.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, YOLO_FRAME_HEIGHT)
+        logging.info(f"Camera properties set (attempted): {YOLO_FRAME_WIDTH}x{YOLO_FRAME_HEIGHT}")
+        
+        while game_version in active_games and active_games[game_version].get("running"):
+            processed_frame_for_send = None
+            warped_board_for_send = None
+            corners = None
+            
+            try:
+                # Get the latest frame from the threaded video stream
+                ret, frame = video_stream.read()
+                if not ret or frame is None:
+                    logging.warning("Failed to grab frame from VideoStream. Waiting before retry...")
+                    async with frame_lock:
+                        latest_frame, latest_transformed_frame = None, None
+                    await asyncio.sleep(1)
+                    continue
+                    
+                frame_count += 1
+                current_frame_copy = frame.copy()
+                local_latest_transformed = None
+                
+                # Find board corners and transform
+                corners = find_board_corners(current_frame_copy)
+                if corners is not None:
+                    warped = transform_board(current_frame_copy, corners)
+                    if warped is not None:
+                        local_latest_transformed = warped
+                        warped_board_for_send = warped
+                
+                # Update global frame references with lock
+                async with frame_lock:
+                    latest_frame = current_frame_copy
+                    latest_transformed_frame = local_latest_transformed
+                
+                # Prepare frame for sending to frontend
+                processed_frame_for_send = current_frame_copy
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                cv2.putText(processed_frame_for_send, timestamp, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(processed_frame_for_send, f"Mode: {game_version.upper()}", (processed_frame_for_send.shape[1] - 150, 25), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1, cv2.LINE_AA)
+                
+                # Draw detected corners
+                if corners is not None:
+                    cv2.polylines(processed_frame_for_send, [np.int32(corners)], isClosed=True, color=(0, 255, 255), thickness=2)
+                
+                # Encode and send frames
+                encode_param = [cv2.IMWRITE_JPEG_QUALITY, 75]
+                ret_main, buffer_main = cv2.imencode('.jpg', processed_frame_for_send, encode_param)
+                jpg_main_as_text = base64.b64encode(buffer_main).decode('utf-8') if ret_main else None
+                jpg_transformed_as_text = None
+                
+                if warped_board_for_send is not None:
+                    ret_trans, buffer_trans = cv2.imencode('.jpg', warped_board_for_send, encode_param)
+                    if ret_trans:
+                        jpg_transformed_as_text = base64.b64encode(buffer_trans).decode('utf-8')
+                
+                # Send to WebSocket if connected
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    if jpg_main_as_text:
+                        payload = {"frame": jpg_main_as_text}
+                        if jpg_transformed_as_text:
+                            payload["transformed_frame"] = jpg_transformed_as_text
+                        await websocket.send_json({"type": "frame_update", "payload": payload})
+                    else:
+                        logging.warning("Skipping send: main frame encoding failed.")
+                else:
+                    logging.warning("WS closed in capture loop.")
+                    break
+                
+                # Log FPS periodically
+                current_time = time.time()
+                if current_time - last_log_time >= 5.0:
+                    fps = frame_count / (current_time - last_log_time)
+                    logging.info(f"Camera FPS: {fps:.2f}")
+                    frame_count = 0
+                    last_log_time = current_time
+                
+                # Brief sleep to avoid consuming too much CPU
+                await asyncio.sleep(0.035)
+                
+            except WebSocketDisconnect:
+                logging.info(f"WS disconnected gracefully in capture loop.")
+                break
+            except Exception as e:
+                logging.error(f"Error in frame capture loop for {game_version}: {e}", exc_info=True)
+                await asyncio.sleep(1)
+    
+    finally:
+        # Clean up resources
+        if video_stream:
+            video_stream.release()
+            if game_version in video_streams:
+                del video_streams[game_version]
+            logging.info(f"VideoStream released for {game_version}.")
+        
+        # Clear global frame references
+        async with frame_lock:
+            latest_frame, latest_transformed_frame = None, None
+            
+        logging.info(f"Frame capture task stopped for {game_version}.")
 
 # --- YOLO/Color Detection Helper Functions (No changes needed regarding ESP32 client) ---
 # ... (yolo_assign_color, detect_object_at_card, detect_color_at_card remain the same internally regarding detection logic)
@@ -1302,5 +1396,15 @@ class MemoryMatching:
         self.running = False
         if "running" in self.game_state:
             self.game_state["running"] = False
+            
+        # Clean up any active video streams for this game
+        for game_version, stream in list(video_streams.items()):
+            if game_version == self.mode:
+                try:
+                    stream.release()
+                    del video_streams[game_version]
+                    logging.info(f"Released VideoStream for {game_version} during cleanup")
+                except Exception as e:
+                    logging.error(f"Error releasing VideoStream for {game_version}: {e}")
 
 
