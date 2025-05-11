@@ -55,6 +55,8 @@ class RubiksCubeGame:
         self.config = config or {}
         self.serial_port = self.config.get('serial_port', 'COM7')
         self.serial_baudrate = self.config.get('serial_baudrate', 9600)
+        # Only set camera_url if provided in config, else None
+        self.camera_url = config.get("ip_camera_url") if config and "ip_camera_url" in config else None
         
         # Initialize Arduino connection
         self.init_serial()
@@ -1225,4 +1227,4 @@ class RubiksCubeGame:
             "solution": self.solution if self.solution else None,
             "error_message": self.error_message if self.mode == "error" else None,
             "serial_connected": self.serial_connection is not None and self.serial_connection.is_open
-        } 
+        }

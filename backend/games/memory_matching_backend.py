@@ -21,7 +21,7 @@ from utils.esp32_client import esp32_client as global_esp32_client_instance
 
 # --- Configuration ---
 # SERIAL_PORT and BAUD_RATE are no longer needed
-CAMERA_URL = 'http://192.168.49.249:4747/video' # Primary Camera URL
+CAMERA_URL = None  # No default, only use value from config
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -614,7 +614,7 @@ async def detect_color_at_card(card_id: int) -> Optional[str]:
 
 
 # --- Game Logic Runners ---
-async def run_yolo_game(websocket: WebSocket):
+async def run_yolo_game(websocket: WebSocket, camera_url=None):
     game_state_key = "yolo"
     logging.info(f"[{game_state_key.upper()}] Starting Game Logic...")
     # Ensure esp32_client is on the websocket object (set by websocket_endpoint or GameSession.run_game)
@@ -660,8 +660,9 @@ async def run_yolo_game(websocket: WebSocket):
 
     camera_task = None
     init_home_success = False
+    cam_url = camera_url
     if game_state.get("running"):
-        camera_task = asyncio.create_task(capture_frames(websocket, CAMERA_URL, game_state_key))
+        camera_task = asyncio.create_task(capture_frames(websocket, cam_url, game_state_key))
         logging.info(f"[{game_state_key.upper()}] Sending initial home command...")
         init_home_success = await from_to(websocket, "home", "home", -1) # `from_to` will use the client from game_state
         if not init_home_success:
@@ -852,7 +853,7 @@ async def run_yolo_game(websocket: WebSocket):
         logging.info(f"[{game_state_key.upper()}] Runner finished cleanup.")
 
 
-async def run_color_game(websocket: WebSocket):
+async def run_color_game(websocket: WebSocket, camera_url=None):
     game_state_key = "color"
     logging.info(f"[{game_state_key.upper()}] Starting Game Logic...")
     current_esp32_client = getattr(websocket, "esp32_client", None)
@@ -890,8 +891,9 @@ async def run_color_game(websocket: WebSocket):
 
     camera_task = None
     init_home_success = False
+    cam_url = camera_url
     if game_state.get("running"):
-        camera_task = asyncio.create_task(capture_frames(websocket, CAMERA_URL, game_state_key))
+        camera_task = asyncio.create_task(capture_frames(websocket, cam_url, game_state_key))
         logging.info(f"[{game_state_key.upper()}] Sending initial home command...")
         init_home_success = await from_to(websocket, "home", "home", -1)
         if not init_home_success:
@@ -1097,6 +1099,11 @@ class MemoryMatching:
                 self.mode = config["mode"]
         self._initialized = False
         self.esp32_client = esp32_client # Store the passed client
+        # Only set camera_url if provided in config, else None
+        if config and "ip_camera_url" in config and config["ip_camera_url"]:
+            self.camera_url = config["ip_camera_url"]
+        else:
+            self.camera_url = None
         # Track if game is running (used by main.py)
         self.running = False
         # Game state tracking
@@ -1207,10 +1214,11 @@ class MemoryMatching:
             # Set context on websocket for from_to function
             setattr(websocket, 'game_version_context', self.mode)
             
+            # Use self.camera_url if set, else None
             if self.mode == "yolo":
-                await run_yolo_game(websocket)
+                await run_yolo_game(websocket, camera_url=self.camera_url)
             else: # Default to color
-                await run_color_game(websocket)
+                await run_color_game(websocket, camera_url=self.camera_url)
             
             self.running = False
             self.game_state["running"] = False
@@ -1220,5 +1228,5 @@ class MemoryMatching:
         self.running = False
         if "running" in self.game_state:
             self.game_state["running"] = False
-            
-            
+
+

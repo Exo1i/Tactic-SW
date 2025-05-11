@@ -75,8 +75,13 @@ def create_multitracker():
     raise RuntimeError("MultiTracker not available in your OpenCV installation.")
 
 class ShellGame:
-    def __init__(self, esp32_client=None):
-        self.esp32_client = esp32_client  # Store the ESP32 client if provided
+    def __init__(self, esp32_client=None, config=None):
+        self.esp32_client = esp32_client
+        # Only set ipcam_url if provided in config, else None
+        if config and "ip_camera_url" in config and config["ip_camera_url"]:
+            self.ipcam_url = config["ip_camera_url"]
+        else:
+            self.ipcam_url = None
         self.ball_position = None
         self.ball_under_cup = None
         self.last_nearest_cup = None
@@ -93,7 +98,7 @@ class ShellGame:
         self.last_moved_cup_idx = None
         self.last_ball_under_cup_idx = None
         self.stopped = False
-        self.video_stream = VideoStream(IPCAM_URL)
+        self.video_stream = VideoStream(self.ipcam_url) if self.ipcam_url else None
         self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
         self.arm_command_sent = False
         self.last_sent_cup = None
@@ -110,9 +115,11 @@ class ShellGame:
     def get_ipcam_frame(self):
         if self.stopped:
             return None
-        if not self.video_stream:
-            self.video_stream = VideoStream(IPCAM_URL)
+        if not self.video_stream and self.ipcam_url:
+            self.video_stream = VideoStream(self.ipcam_url)
             time.sleep(1)
+        if not self.video_stream:
+            return None
         ret, frame = self.video_stream.read()
         if not ret or frame is None or frame.size == 0:
             return None
