@@ -60,8 +60,9 @@ class VideoStream:
 
 class GameSession:
     def __init__(self, config):
-        self.esp32_client = config.get("esp32_client")  # Only use esp32_client
-        self.webcam_ip = "http://192.168.49.1:4747/video" # Default if not provided
+        self.esp32_client = config.get("esp32_client")
+        # Only set webcam_ip if provided in config, else None
+        self.webcam_ip = config.get("ip_camera_url")
 
         model_path_config = config.get("model_path", "games/TargetDetection/runs/detect/train/weights/best.pt")
         backend_base_dir = os.path.join(os.path.dirname(__file__), "..")

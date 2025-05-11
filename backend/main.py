@@ -133,6 +133,9 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             if "text" in first_message:
                 try: 
                     config = json.loads(first_message["text"])
+                    # --- Debug log for IP camera address ---
+                    if config and "ip_camera_url" in config:
+                        print(f"[DEBUG] Received IP camera URL from frontend: {config['ip_camera_url']}")
                 except Exception:
                     config = None
             elif "bytes" in first_message:
@@ -148,8 +151,13 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             config = None
             first_frame_bytes = None
             if "text" in first_message:
-                try: config = json.loads(first_message["text"])
-                except Exception: config = None  # Or treat as command
+                try:
+                    config = json.loads(first_message["text"])
+                    # --- Debug log for IP camera address ---
+                    if config and "ip_camera_url" in config:
+                        print(f"[DEBUG] Received IP camera URL from frontend: {config['ip_camera_url']}")
+                except Exception:
+                    config = None  # Or treat as command
             elif "bytes" in first_message:
                 first_frame_bytes = first_message["bytes"]
             

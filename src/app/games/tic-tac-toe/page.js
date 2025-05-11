@@ -8,6 +8,7 @@ export default function TicTacToePage() {
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const ipCamImgRef = useRef(null);
+  const ipInputRef = useRef(null);
 
   const [status, setStatus] = useState("Connecting...");
   const [output, setOutput] = useState(null);
@@ -66,7 +67,18 @@ export default function TicTacToePage() {
     ws.onopen = () => {
       setStatus("Connected");
       // Send config as first message
-      ws.send(JSON.stringify(tttArgs));
+      const config = { ...tttArgs };
+      if (
+        appliedCameraSettings.useIpCamera &&
+        appliedCameraSettings.ipCameraAddress
+      ) {
+        config.ip_camera_url = appliedCameraSettings.ipCameraAddress;
+      }
+      // Ensure log is visible in browser console
+      if (typeof window !== "undefined" && window.console) {
+        window.console.log("[TicTacToe] Sending config to backend:", config);
+      }
+      ws.send(JSON.stringify(config));
     };
     ws.onclose = () => setStatus("Disconnected");
     ws.onerror = () => setStatus("Error");
@@ -83,8 +95,7 @@ export default function TicTacToePage() {
           setProcessedFrame(`data:image/jpeg;base64,${data.processed_frame}`);
         if (data.bird_view_frame)
           setBirdViewFrame(`data:image/jpeg;base64,${data.bird_view_frame}`);
-        else
-          setBirdViewFrame(null); // Clear if no bird view available
+        else setBirdViewFrame(null); // Clear if no bird view available
       } catch {
         setOutput(event.data);
       }
@@ -143,7 +154,26 @@ export default function TicTacToePage() {
 
   const handleCameraSettingsChange = (newSettings) => {
     setCameraSettings(newSettings);
+    // Save IP camera address to local storage
+    if (typeof newSettings.ipCameraAddress === "string") {
+      localStorage.setItem("ipCameraAddress", newSettings.ipCameraAddress);
+    }
   };
+
+  // Helper to save IP to local storage and apply settings
+  const saveIpAndApplySettings = () => {
+    if (typeof cameraSettings.ipCameraAddress === "string") {
+      localStorage.setItem("ipCameraAddress", cameraSettings.ipCameraAddress);
+    }
+    setAppliedCameraSettings(cameraSettings);
+    setShowSettings(false);
+  };
+
+  useEffect(() => {
+    if (showSettings && cameraSettings.useIpCamera && ipInputRef.current) {
+      ipInputRef.current.focus();
+    }
+  }, [showSettings, cameraSettings.useIpCamera]);
 
   const SettingsModal = () =>
     showSettings && (
@@ -178,6 +208,7 @@ export default function TicTacToePage() {
                 IP Camera URL:
               </label>
               <input
+                ref={ipInputRef}
                 type="text"
                 id="ipCameraAddress"
                 value={cameraSettings.ipCameraAddress}
@@ -189,6 +220,12 @@ export default function TicTacToePage() {
                 }
                 placeholder="http://camera-ip:port/stream"
                 className="w-full p-2 border rounded"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    saveIpAndApplySettings();
+                  }
+                }}
               />
               <small className="text-gray-500">
                 Example: http://192.168.1.100:8080/video
@@ -196,10 +233,7 @@ export default function TicTacToePage() {
             </div>
           )}
           <button
-            onClick={() => {
-              setAppliedCameraSettings(cameraSettings);
-              setShowSettings(false);
-            }}
+            onClick={saveIpAndApplySettings}
             className="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600"
           >
             Apply Settings
@@ -241,7 +275,9 @@ export default function TicTacToePage() {
             <input
               type="text"
               value={tttArgs.model}
-              onChange={e => setTttArgs(a => ({ ...a, model: e.target.value }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({ ...a, model: e.target.value }))
+              }
               className="w-full p-2 border rounded"
             />
           </div>
@@ -252,11 +288,14 @@ export default function TicTacToePage() {
               step="0.1"
               min="0.2" // Changed from 1 to 0.2 to allow smaller values
               value={tttArgs.zoom}
-              onChange={e => setTttArgs(a => ({ ...a, zoom: parseFloat(e.target.value) }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({ ...a, zoom: parseFloat(e.target.value) }))
+              }
               className="w-full p-2 border rounded"
             />
             <small className="text-gray-500">
-              Lower values (0.2-0.5) show more of the paper, higher values zoom in.
+              Lower values (0.2-0.5) show more of the paper, higher values zoom
+              in.
             </small>
           </div>
           <div className="mb-2">
@@ -266,7 +305,12 @@ export default function TicTacToePage() {
               step="0.1"
               min="0.1"
               value={tttArgs.check_interval}
-              onChange={e => setTttArgs(a => ({ ...a, check_interval: parseFloat(e.target.value) }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({
+                  ...a,
+                  check_interval: parseFloat(e.target.value),
+                }))
+              }
               className="w-full p-2 border rounded"
             />
           </div>
@@ -289,9 +333,7 @@ export default function TicTacToePage() {
             Warning: Device camera access requires HTTPS in most browsers.
           </div>
         )}
-        <h2 className="text-xl font-semibold mb-4">
-          Playing: Tic Tac Toe
-        </h2>
+        <h2 className="text-xl font-semibold mb-4">Playing: Tic Tac Toe</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="flex flex-col items-center">
             <div className="mb-2 text-center font-medium">Raw Camera</div>
@@ -333,9 +375,7 @@ export default function TicTacToePage() {
             />
           </div>
           <div className="flex flex-col items-center">
-            <div className="mb-2 text-center font-medium">
-              Bird's Eye View
-            </div>
+            <div className="mb-2 text-center font-medium">Bird's Eye View</div>
             <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center">
               {birdViewFrame ? (
                 <img

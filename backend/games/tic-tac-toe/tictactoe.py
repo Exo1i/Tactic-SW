@@ -55,6 +55,9 @@ class GameSession:
         self.PICKUP_TRUE = 0
         self.PICKUP_FALSE = 1
 
+        # Only set camera_url if provided in config, else None
+        self.camera_url = config.get("ip_camera_url")
+
     async def _send_switch_command(self):
         """Send a switch command to ESP32 to activate ARM mode"""
         if self.esp32_client is None:
