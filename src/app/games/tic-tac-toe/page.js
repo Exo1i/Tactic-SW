@@ -2,12 +2,88 @@
 import { useState, useRef, useEffect } from "react";
 import { initializeVideoSource } from "@/utils/cameraUtils";
 
+// Define SettingsModalComponent outside TicTacToePage
+const SettingsModalComponent = ({
+  showSettings,
+  setShowSettings,
+  cameraSettings,
+  handleCameraSettingsChange,
+  ipCameraInputRef,
+  setAppliedCameraSettings,
+}) => {
+  if (!showSettings) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+      <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md relative">
+        <button
+          className="absolute top-2 right-2 text-gray-400 hover:text-gray-700"
+          onClick={() => setShowSettings(false)}
+          aria-label="Close"
+        >
+          ×
+        </button>
+        <h3 className="text-lg font-medium mb-3">Camera Settings</h3>
+        <div className="flex items-center mb-3">
+          <input
+            type="checkbox"
+            id="useIpCamera"
+            checked={cameraSettings.useIpCamera}
+            onChange={(e) =>
+              handleCameraSettingsChange({
+                ...cameraSettings,
+                useIpCamera: e.target.checked,
+              })
+            }
+            className="mr-2"
+          />
+          <label htmlFor="useIpCamera">Use IP Camera</label>
+        </div>
+        {cameraSettings.useIpCamera && (
+          <div className="mb-3">
+            <label htmlFor="ipCameraAddress" className="block mb-1">
+              IP Camera URL:
+            </label>
+            <input
+              ref={ipCameraInputRef}
+              type="text"
+              id="ipCameraAddress"
+              value={cameraSettings.ipCameraAddress}
+              onChange={(e) =>
+                handleCameraSettingsChange({
+                  ...cameraSettings,
+                  ipCameraAddress: e.target.value,
+                })
+              }
+              placeholder="http://camera-ip:port/stream"
+              className="w-full p-2 border rounded"
+            />
+            <small className="text-gray-500">
+              Example: http://192.168.1.100:8080/video
+            </small>
+          </div>
+        )}
+        <button
+          onClick={() => {
+            setAppliedCameraSettings(cameraSettings);
+            setShowSettings(false);
+          }}
+          className="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600"
+        >
+          Apply Settings
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export default function TicTacToePage() {
   const gameId = "tic-tac-toe";
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const ipCamImgRef = useRef(null);
+  const ipCameraInputRef = useRef(null); // Ref for IP camera input in modal
 
   const [status, setStatus] = useState("Connecting...");
   const [output, setOutput] = useState(null);
@@ -35,10 +111,40 @@ export default function TicTacToePage() {
   // Loading indicators
   const [isCameraLoading, setIsCameraLoading] = useState(false);
   const [isBackendLoading, setIsBackendLoading] = useState(false);
+  const [isSecureContext, setIsSecureContext] = useState(true);
 
   const sendNextFrameRef = useRef(true);
   const lastSentRef = useRef(0);
   const minFrameInterval = 100; // 10 FPS
+
+  useEffect(() => {
+    setIsSecureContext(window.isSecureContext === true);
+  }, []);
+
+  // Focus input field when settings modal opens
+  useEffect(() => {
+    if (
+      showSettings &&
+      cameraSettings.useIpCamera &&
+      ipCameraInputRef.current
+    ) {
+      setTimeout(() => {
+        ipCameraInputRef.current.focus();
+      }, 100);
+    }
+  }, [showSettings, cameraSettings.useIpCamera]);
+
+  // Handle Escape key press for modal
+  useEffect(() => {
+    const handleEscapeKey = (e) => {
+      if (e.key === "Escape" && showSettings) {
+        setShowSettings(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleEscapeKey);
+    return () => window.removeEventListener("keydown", handleEscapeKey);
+  }, [showSettings]);
 
   useEffect(() => {
     if (!tttStarted) return;
@@ -83,8 +189,7 @@ export default function TicTacToePage() {
           setProcessedFrame(`data:image/jpeg;base64,${data.processed_frame}`);
         if (data.bird_view_frame)
           setBirdViewFrame(`data:image/jpeg;base64,${data.bird_view_frame}`);
-        else
-          setBirdViewFrame(null); // Clear if no bird view available
+        else setBirdViewFrame(null); // Clear if no bird view available
       } catch {
         setOutput(event.data);
       }
@@ -145,72 +250,16 @@ export default function TicTacToePage() {
     setCameraSettings(newSettings);
   };
 
-  const SettingsModal = () =>
-    showSettings && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
-        <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md relative">
-          <button
-            className="absolute top-2 right-2 text-gray-400 hover:text-gray-700"
-            onClick={() => setShowSettings(false)}
-            aria-label="Close"
-          >
-            ×
-          </button>
-          <h3 className="text-lg font-medium mb-3">Camera Settings</h3>
-          <div className="flex items-center mb-3">
-            <input
-              type="checkbox"
-              id="useIpCamera"
-              checked={cameraSettings.useIpCamera}
-              onChange={(e) =>
-                handleCameraSettingsChange({
-                  ...cameraSettings,
-                  useIpCamera: e.target.checked,
-                })
-              }
-              className="mr-2"
-            />
-            <label htmlFor="useIpCamera">Use IP Camera</label>
-          </div>
-          {cameraSettings.useIpCamera && (
-            <div className="mb-3">
-              <label htmlFor="ipCameraAddress" className="block mb-1">
-                IP Camera URL:
-              </label>
-              <input
-                type="text"
-                id="ipCameraAddress"
-                value={cameraSettings.ipCameraAddress}
-                onChange={(e) =>
-                  handleCameraSettingsChange({
-                    ...cameraSettings,
-                    ipCameraAddress: e.target.value,
-                  })
-                }
-                placeholder="http://camera-ip:port/stream"
-                className="w-full p-2 border rounded"
-              />
-              <small className="text-gray-500">
-                Example: http://192.168.1.100:8080/video
-              </small>
-            </div>
-          )}
-          <button
-            onClick={() => {
-              setAppliedCameraSettings(cameraSettings);
-              setShowSettings(false);
-            }}
-            className="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600"
-          >
-            Apply Settings
-          </button>
-        </div>
-      </div>
-    );
-
   return (
     <div className="flex flex-col items-center gap-4 p-4 min-h-screen bg-gradient-to-br from-gray-100 to-gray-300">
-      <SettingsModal />
+      <SettingsModalComponent
+        showSettings={showSettings}
+        setShowSettings={setShowSettings}
+        cameraSettings={cameraSettings}
+        handleCameraSettingsChange={handleCameraSettingsChange}
+        ipCameraInputRef={ipCameraInputRef}
+        setAppliedCameraSettings={setAppliedCameraSettings}
+      />
       <div className="w-full max-w-4xl bg-white rounded-xl shadow-lg p-6 mt-4">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-4">
           <h1 className="text-2xl font-bold mb-2 md:mb-0">Tic Tac Toe</h1>
@@ -241,7 +290,9 @@ export default function TicTacToePage() {
             <input
               type="text"
               value={tttArgs.model}
-              onChange={e => setTttArgs(a => ({ ...a, model: e.target.value }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({ ...a, model: e.target.value }))
+              }
               className="w-full p-2 border rounded"
             />
           </div>
@@ -252,11 +303,14 @@ export default function TicTacToePage() {
               step="0.1"
               min="0.2" // Changed from 1 to 0.2 to allow smaller values
               value={tttArgs.zoom}
-              onChange={e => setTttArgs(a => ({ ...a, zoom: parseFloat(e.target.value) }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({ ...a, zoom: parseFloat(e.target.value) }))
+              }
               className="w-full p-2 border rounded"
             />
             <small className="text-gray-500">
-              Lower values (0.2-0.5) show more of the paper, higher values zoom in.
+              Lower values (0.2-0.5) show more of the paper, higher values zoom
+              in.
             </small>
           </div>
           <div className="mb-2">
@@ -266,7 +320,12 @@ export default function TicTacToePage() {
               step="0.1"
               min="0.1"
               value={tttArgs.check_interval}
-              onChange={e => setTttArgs(a => ({ ...a, check_interval: parseFloat(e.target.value) }))}
+              onChange={(e) =>
+                setTttArgs((a) => ({
+                  ...a,
+                  check_interval: parseFloat(e.target.value),
+                }))
+              }
               className="w-full p-2 border rounded"
             />
           </div>
@@ -284,14 +343,12 @@ export default function TicTacToePage() {
             see a blank image, check your camera's settings.
           </div>
         )}
-        {!window.isSecureContext && (
+        {!isSecureContext && (
           <div className="mb-2 text-red-600 text-sm">
             Warning: Device camera access requires HTTPS in most browsers.
           </div>
         )}
-        <h2 className="text-xl font-semibold mb-4">
-          Playing: Tic Tac Toe
-        </h2>
+        <h2 className="text-xl font-semibold mb-4">Playing: Tic Tac Toe</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="flex flex-col items-center">
             <div className="mb-2 text-center font-medium">Raw Camera</div>
@@ -333,9 +390,7 @@ export default function TicTacToePage() {
             />
           </div>
           <div className="flex flex-col items-center">
-            <div className="mb-2 text-center font-medium">
-              Bird's Eye View
-            </div>
+            <div className="mb-2 text-center font-medium">Bird's Eye View</div>
             <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center">
               {birdViewFrame ? (
                 <img
