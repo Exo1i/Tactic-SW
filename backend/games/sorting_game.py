@@ -24,11 +24,17 @@ class GameSession:
         # Game state variables
         self.board_detected = False
         self.warped_board = None
-        self.grid_shapes = [[None for _ in range(4)] for _ in range(2)]
+        self.grid_shapes = [["Circle" for _ in range(4)] for _ in range(2)]  # Changed default from None to "Circle"
         self.required_swaps = []
         self.current_move = None
         self.game_completed = False
         self.game_started = False
+        
+        # Detection enhancement variables
+        self.detection_frames_count = 0
+        self.detection_attempt_interval = 5  # Try to detect every 5 frames
+        self.last_corners = None  # Store last successful detection for stability
+        self.corner_stability_threshold = 0.85  # Controls corner position stability (0-1)
         
         # Constants
         self.BOARD_HEIGHT = 200
@@ -167,67 +173,74 @@ class GameSession:
             return False
     
     def find_board_corners(self, frame):
-        """Find the four corners of a white frame on a dark background."""
+        """Find the four corners of a white board on a black background."""
         if frame is None:
             return None
-            
+
+        # Convert to grayscale and HSV for robust detection
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        lower_white = np.array([0, 0, 180])
-        upper_white = np.array([180, 50, 255])
-        mask = cv2.inRange(hsv, lower_white, upper_white)
+
+        # Threshold for white in HSV (tuned for white board on black bg)
+        lower_white_hsv = np.array([0, 0, 180])
+        upper_white_hsv = np.array([180, 50, 255])
+        hsv_mask = cv2.inRange(hsv, lower_white_hsv, upper_white_hsv)
+
+        # Morphological operations to clean up mask
         kernel = np.ones((7, 7), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(hsv_mask, cv2.MORPH_CLOSE, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+        # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         if not contours:
-            return None
+            return self.last_corners
 
-        candidates = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            # Filter by area to avoid small artifacts
-            if area < 10000 or area > (frame.shape[0] * frame.shape[1] * 0.8):
-                continue
-            perimeter = cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
-            if len(approx) == 4:
-                candidates.append(approx)
+        # Only consider the largest contour (should be the board)
+        largest_contour = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest_contour)
+        frame_area = frame.shape[0] * frame.shape[1]
+        if area < frame_area * 0.05 or area > frame_area * 0.95:
+            return self.last_corners
 
-        if not candidates:
-            return None
+        # Approximate to polygon
+        peri = cv2.arcLength(largest_contour, True)
+        approx = cv2.approxPolyDP(largest_contour, 0.02 * peri, True)
+        if len(approx) != 4:
+            # Try convex hull if not 4 corners
+            hull = cv2.convexHull(largest_contour)
+            peri = cv2.arcLength(hull, True)
+            approx = cv2.approxPolyDP(hull, 0.02 * peri, True)
+            if len(approx) != 4:
+                return self.last_corners
 
-        largest_contour = max(candidates, key=cv2.contourArea)
-        corners = np.array([point[0] for point in largest_contour], dtype=np.float32)
-        return self.sort_corners(corners)
+        corners = np.array([point[0] for point in approx], dtype=np.float32)
+        sorted_corners = self.sort_corners(corners)
+        self.last_corners = sorted_corners
+        return sorted_corners
 
     def sort_corners(self, corners):
         """Sort corners in order: top-left, top-right, bottom-right, bottom-left."""
-        # First sort by sum of coordinates (x+y)
+        # Use sum and diff for robust sorting
         s = corners.sum(axis=1)
         rect = np.zeros((4, 2), dtype="float32")
-        rect[0] = corners[np.argmin(s)]  # Top-left has smallest sum
-        rect[2] = corners[np.argmax(s)]  # Bottom-right has largest sum
-        
-        # Then sort by difference of coordinates (x-y)
+        rect[0] = corners[np.argmin(s)]  # Top-left
+        rect[2] = corners[np.argmax(s)]  # Bottom-right
         diff = np.diff(corners, axis=1)
-        rect[1] = corners[np.argmin(diff)]  # Top-right has smallest difference
-        rect[3] = corners[np.argmax(diff)]  # Bottom-left has largest difference
-        
+        rect[1] = corners[np.argmin(diff)]  # Top-right
+        rect[3] = corners[np.argmax(diff)]  # Bottom-left
         return rect
 
     def transform_board(self, frame, corners):
         """Apply perspective transform to get top-down view of board."""
         if frame is None or corners is None:
             return None
-            
         dst_points = np.array([
             [0, 0],
             [self.BOARD_WIDTH - 1, 0],
             [self.BOARD_WIDTH - 1, self.BOARD_HEIGHT - 1],
             [0, self.BOARD_HEIGHT - 1]
         ], dtype=np.float32)
-        
         try:
             M = cv2.getPerspectiveTransform(corners, dst_points)
             warped = cv2.warpPerspective(frame, M, (self.BOARD_WIDTH, self.BOARD_HEIGHT))
@@ -237,63 +250,63 @@ class GameSession:
             return None
 
     def detect_shapes(self, warped_board):
-        """Detect shapes in a 2x4 grid on the warped board."""
+        """Detect shapes in a 2x4 grid on the warped board (which is now tightly fit to the board)."""
         if warped_board is None:
-            return None
-            
+            return [["Circle" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)], None
+
         board_height, board_width = warped_board.shape[:2]
         cell_width = board_width // self.GRID_COLS
         cell_height = board_height // self.GRID_ROWS
-        shapes_grid = [[None for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
-        
+        shapes_grid = [["Circle" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
+
         display_grid = warped_board.copy()
-        
+
         for i in range(self.GRID_ROWS):
             for j in range(self.GRID_COLS):
                 x1, y1 = j * cell_width, i * cell_height
                 x2, y2 = (j + 1) * cell_width, (i + 1) * cell_height
-                
-                # Draw cell boundaries
+
+                # Draw cell boundaries (on warped board only)
                 cv2.rectangle(display_grid, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                
+
                 # Add some padding to avoid edge effects
                 padding = 5
                 x1 += padding
                 y1 += padding
                 x2 -= padding
                 y2 -= padding
-                
+
                 if x1 < x2 and y1 < y2:
                     cell = warped_board[y1:y2, x1:x2]
-                    
+
                     # Process the cell
                     if cell.size > 0:
                         gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
                         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-                        
+
                         # Use adaptive thresholding for better shape segmentation
                         thresh = cv2.adaptiveThreshold(
                             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
                         )
-                        
+
                         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                         shape = "Unknown"
                         max_area = 0
                         best_contour = None
-                        
+
                         # Select the largest contour
                         for cnt in contours:
                             area = cv2.contourArea(cnt)
                             if area > max_area and area > 50:
                                 max_area = area
                                 best_contour = cnt
-                        
+
                         if best_contour is not None:
                             peri = cv2.arcLength(best_contour, True)
                             epsilon = 0.04 * peri  # Adjusted for finer approximation
                             approx = cv2.approxPolyDP(best_contour, epsilon, True)
                             corners = len(approx)
-                            
+
                             if corners == 3:
                                 shape = "Triangle"
                             elif corners == 4:
@@ -307,15 +320,15 @@ class GameSession:
                                     circularity = 4 * np.pi * area / (peri * peri)
                                     if circularity > 0.7:  # Higher value means more circular
                                         shape = "Circle"
-                            
+
                             # Draw shape label on display grid
                             label_x = x1 + (x2 - x1) // 3
                             label_y = y1 + (y2 - y1) // 2
                             cv2.putText(display_grid, shape, (label_x, label_y), 
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                        
+
                         shapes_grid[i][j] = shape
-        
+
         return shapes_grid, display_grid
     
     def determine_swaps(self, grid):
@@ -393,6 +406,8 @@ class GameSession:
             # Calculate FPS
             current_time = time.time()
             self.frame_count += 1
+            self.detection_frames_count += 1
+            
             if current_time - self.last_frame_time >= 1.0:
                 self.fps = self.frame_count / (current_time - self.last_frame_time)
                 self.last_frame_time = current_time
@@ -401,8 +416,15 @@ class GameSession:
             # Create a display frame for visualization
             display_frame = frame.copy()
             
-            # Try to find board corners
-            corners = self.find_board_corners(frame)
+            # Try to find board corners on a regular basis
+            corners = None
+            if self.detection_frames_count >= self.detection_attempt_interval:
+                self.detection_frames_count = 0
+                corners = self.find_board_corners(frame)
+            elif self.last_corners is not None:
+                # Use last known corners between detection attempts for stability
+                corners = self.last_corners
+            
             warped_display = None
             
             if corners is not None:
@@ -477,7 +499,7 @@ class GameSession:
                 "game_started": self.game_started,
                 "game_completed": self.game_completed,
                 "status_message": self.status_message,
-                "grid_shapes": self.grid_shapes if self.grid_shapes else [["Unknown"] * 4, ["Unknown"] * 4],
+                "grid_shapes": self.grid_shapes if self.grid_shapes else [["Circle"] * 4, ["Circle"] * 4],
                 "required_swaps": self.required_swaps,
                 "current_move": self.current_move
             }
@@ -510,6 +532,8 @@ class GameSession:
                 self.game_completed = False
                 self.required_swaps = []
                 self.current_move = None
+                # Update default shape to Circle
+                self.grid_shapes = [["Circle" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
                 self.status_message = "Game reset. Position the board to start again."
                 return {"status": "ok", "message": "Game reset"}
                 
@@ -563,7 +587,7 @@ class GameSession:
                     "game_started": self.game_started,
                     "game_completed": self.game_completed,
                     "status_message": self.status_message,
-                    "grid_shapes": self.grid_shapes if self.grid_shapes else [["Unknown"] * 4, ["Unknown"] * 4],
+                    "grid_shapes": self.grid_shapes if self.grid_shapes else [["Circle"] * 4, ["Circle"] * 4],
                     "required_swaps": self.required_swaps,
                     "current_move": self.current_move
                 }
