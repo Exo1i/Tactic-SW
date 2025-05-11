@@ -95,12 +95,25 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
         return
 
     try:
-        # Special handling for memory matching games (color/yolo)
+        # --- Receive config from frontend as first message ---
+        config = None
+        first_message = await websocket.receive()
+        if "text" in first_message:
+            try:
+                config = json.loads(first_message["text"])
+                # Debug log for IP camera address
+                if config and "ip_camera_url" in config:
+                    print(f"[DEBUG] Received ip_camera_url from frontend: {config['ip_camera_url']}")
+            except Exception:
+                config = {}
+        elif "bytes" in first_message:
+            config = {}
+
+        # --- Special handling for memory matching games (color/yolo) ---
         if game_id in ["color", "yolo"]:
-            # Check if we need to create a new instance
-            if memory_game_instances[game_id] is None:
-                memory_game_instances[game_id] = MemoryMatching({"mode": game_id}, esp32_client=esp32_client)
-            
+            # Always create a new MemoryMatching instance with the config
+            memory_game_instances[game_id] = MemoryMatching(config, esp32_client=esp32_client)
+
             # Check if the game is already running
             if memory_game_instances[game_id].running:
                 await websocket.send_json({
@@ -109,28 +122,18 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
                 })
                 await websocket.close()
                 return
-                
+
             # Set ESP32 client on websocket for the game
             setattr(websocket, "esp32_client", esp32_client)
-            
+
             # Run the game - this will handle the entire lifecycle
             await memory_game_instances[game_id].run_game(websocket)
             return  # Important! Game handles its own lifecycle so we return here
-        
+
         # Generalized config handling for all other games
         game_module = importlib.import_module(module_path)
-        first_message = await websocket.receive()
-        config = None
         first_frame_bytes = None
-        if "text" in first_message:
-            try:
-                config = json.loads(first_message["text"])
-                # --- Debug log for IP camera address ---
-                if config and "ip_camera_url" in config:
-                    print(f"[DEBUG] Received IP camera URL from frontend: {config['ip_camera_url']}")
-            except Exception:
-                config = None
-        elif "bytes" in first_message:
+        if "bytes" in first_message:
             first_frame_bytes = first_message["bytes"]
 
         # Instantiate the game session with config if possible

@@ -1100,8 +1100,9 @@ class MemoryMatching:
         self._initialized = False
         self.esp32_client = esp32_client # Store the passed client
         # Only set camera_url if provided in config, else None
+        print(f"Config: {config}")
         if config and "ip_camera_url" in config and config["ip_camera_url"]:
-            self.camera_url = config["ip_camera_url"]
+            self.camera_url = config.get("ip_camera_url", None)
         else:
             self.camera_url = None
         # Track if game is running (used by main.py)
