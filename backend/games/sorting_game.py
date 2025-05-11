@@ -99,7 +99,7 @@ class GameSession:
             pickup = int(pickup_flag)
             
             command = f"{s1},{s2},{s3},{enable},{pickup}"
-            logger.info(f"Sending command: {command}")
+            logger.info(f"Sending command: {command}") # Logs the "arm values" sent
             
             await self.esp32_client.send_json({
                 "action": "command",
@@ -111,12 +111,12 @@ class GameSession:
             return False
     
     async def move_robot_arm(self, from_pos, to_pos):
-        """Move robot arm to pick up a shape from one position and move it to another"""
+        """Move robot arm to swap pieces between two positions using a temporary position"""
         if self.esp32_client is None:
             logger.error("No ESP32 client available, skipping robot movement")
             return False
         
-        logger.info(f"Moving piece from {from_pos} to {to_pos}")
+        logger.info(f"SWAP OPERATION: Moving piece from {from_pos} to {to_pos}")
         
         # Get positions
         if from_pos not in self.arm_positions or to_pos not in self.arm_positions:
@@ -127,46 +127,95 @@ class GameSession:
         to_angles = self.arm_positions[to_pos]
         home_angles = self.ARM_HOME
         
+        # Define temporary position for storing the first piece during swap
+        temp_position = [90, 10, 120]  # Similar to arm_temp1 in TestDetection.py
+        
+        # Debug logs for arm positions
+        logger.info(f"[ARM DEBUG] Source position {from_pos}: {from_angles}")
+        logger.info(f"[ARM DEBUG] Destination position {to_pos}: {to_angles}")
+        logger.info(f"[ARM DEBUG] Home position: {home_angles}")
+        logger.info(f"[ARM DEBUG] Temp position: {temp_position}")
+        
         move_delay = 2.0  # Time to wait between arm movements
         
         try:
-            # Step 1: Move to source position with magnet off
-            logger.info(f"Moving to source position {from_pos}")
-            await self.send_command_to_esp32(*from_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
-            await asyncio.sleep(move_delay)
+            # Step 1: Move first piece (from from_pos) to temp_position
+            logger.info(f"[ARM DEBUG] Step 1: Moving piece from {from_pos} to temp position {temp_position}")
             
-            # Step 2: Turn on magnet to pick up the piece
-            logger.info("Activating magnet to pick up piece")
+            # 1.1: Move to source position (from_pos) and pick up piece
+            logger.info(f"[ARM DEBUG] 1.1: Moving to source {from_pos}: {from_angles} to pick up.")
             await self.send_command_to_esp32(*from_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(move_delay)
             
-            # Step 3: Move to home position with piece
-            logger.info("Moving to home position")
+            # 1.2: Move to home position with piece
+            logger.info(f"[ARM DEBUG] 1.2: Moving to home {home_angles} with piece.")
             await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(move_delay)
             
-            # Step 4: Move to destination position with piece
-            logger.info(f"Moving to destination position {to_pos}")
+            # 1.3: Move to temp position and release piece
+            logger.info(f"[ARM DEBUG] 1.3: Moving to temp position {temp_position} to release piece.")
+            await self.send_command_to_esp32(*temp_position, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await asyncio.sleep(move_delay)
+            
+            # 1.4: Return to home position (empty)
+            logger.info(f"[ARM DEBUG] 1.4: Returning to home {home_angles} (empty).")
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await asyncio.sleep(move_delay)
+            
+            # Step 2: Move second piece (from to_pos) to the first piece's original position (from_pos)
+            logger.info(f"[ARM DEBUG] Step 2: Moving piece from {to_pos} to {from_pos}")
+            
+            # 2.1: Move to second piece's current position (to_pos) and pick up
+            logger.info(f"[ARM DEBUG] 2.1: Moving to source {to_pos}: {to_angles} to pick up.")
             await self.send_command_to_esp32(*to_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(move_delay)
             
-            # Step 5: Release piece
-            logger.info("Releasing piece")
+            # 2.2: Move to home position with second piece
+            logger.info(f"[ARM DEBUG] 2.2: Moving to home {home_angles} with second piece.")
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
+            await asyncio.sleep(move_delay)
+            
+            # 2.3: Move to first piece's original position (from_pos) and release second piece
+            logger.info(f"[ARM DEBUG] 2.3: Moving to destination {from_pos}: {from_angles} to release second piece.")
+            await self.send_command_to_esp32(*from_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await asyncio.sleep(move_delay)
+            
+            # 2.4: Return to home position (empty)
+            logger.info(f"[ARM DEBUG] 2.4: Returning to home {home_angles} (empty).")
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await asyncio.sleep(move_delay)
+            
+            # Step 3: Move first piece (from temp_position) to the second piece's original position (to_pos)
+            logger.info(f"[ARM DEBUG] Step 3: Moving piece from temp position {temp_position} to {to_pos}")
+            
+            # 3.1: Move to temp position and pick up first piece
+            logger.info(f"[ARM DEBUG] 3.1: Moving to temp position {temp_position} to pick up first piece.")
+            await self.send_command_to_esp32(*temp_position, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
+            await asyncio.sleep(move_delay)
+            
+            # 3.2: Move to home position with first piece
+            logger.info(f"[ARM DEBUG] 3.2: Moving to home {home_angles} with first piece.")
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
+            await asyncio.sleep(move_delay)
+            
+            # 3.3: Move to second piece's original position (to_pos) and release first piece
+            logger.info(f"[ARM DEBUG] 3.3: Moving to destination {to_pos}: {to_angles} to release first piece.")
             await self.send_command_to_esp32(*to_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
             await asyncio.sleep(move_delay)
             
-            # Step 6: Return to home position
-            logger.info("Returning to home position")
+            # 3.4: Return to home position with magnet off (final state for this swap)
+            logger.info(f"[ARM DEBUG] 3.4: Final return to home {home_angles} (inactive, empty).")
             await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
             await asyncio.sleep(move_delay)
             
-            logger.info(f"Movement from {from_pos} to {to_pos} completed successfully")
+            logger.info(f"[ARM DEBUG] Swap sequence completed successfully: {from_pos} ⟷ {to_pos}")
             return True
             
         except Exception as e:
-            logger.error(f"Error during robot movement: {e}")
+            logger.error(f"Error during robot movement: {e}", exc_info=True)
             # Try to return to home position in case of error
             try:
+                logger.info("[ARM DEBUG] Error occurred - attempting emergency return to home")
                 await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
             except Exception as home_error:
                 logger.error(f"Failed to return to home after error: {home_error}")
@@ -569,6 +618,9 @@ class GameSession:
                 # Get the next swap
                 from_pos, to_pos = self.required_swaps[0]
                 self.current_move = (from_pos, to_pos)
+                
+                logger.info(f"[SWAP DEBUG] Executing swap between positions: {from_pos} ({self.grid_shapes[from_pos[0]][from_pos[1]]}) and {to_pos} ({self.grid_shapes[to_pos[0]][to_pos[1]]})")
+                
                 self.status_message = f"Executing swap: {from_pos} -> {to_pos}"
                 
                 # Execute the swap using robot arm
@@ -578,7 +630,13 @@ class GameSession:
                     # Update the grid to reflect the swap
                     i1, j1 = from_pos
                     i2, j2 = to_pos
+                    
+                    logger.info(f"[SWAP DEBUG] Swapping grid positions in software:")
+                    logger.info(f"[SWAP DEBUG] Before - Grid[{i1}][{j1}]: {self.grid_shapes[i1][j1]}, Grid[{i2}][{j2}]: {self.grid_shapes[i2][j2]}")
+                    
                     self.grid_shapes[i1][j1], self.grid_shapes[i2][j2] = self.grid_shapes[i2][j2], self.grid_shapes[i1][j1]
+                    
+                    logger.info(f"[SWAP DEBUG] After - Grid[{i1}][{j1}]: {self.grid_shapes[i1][j1]}, Grid[{i2}][{j2}]: {self.grid_shapes[i2][j2]}")
                     
                     # Remove the completed swap from the list
                     self.required_swaps.pop(0)
