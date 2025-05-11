@@ -21,7 +21,7 @@ from utils.esp32_client import esp32_client as global_esp32_client_instance
 
 # --- Configuration ---
 # SERIAL_PORT and BAUD_RATE are no longer needed
-CAMERA_URL = 'http://192.168.49.249:4747/video' # Primary Camera URL
+CAMERA_URL = 'http://192.168.137.252:4747/video' # Primary Camera URL
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -32,11 +32,14 @@ CARD_COUNT = GRID_ROWS * GRID_COLS
 FLIP_DELAY_SECONDS = 0.5 # Delay in game logic loops
 
 # --- Arm Control Values ---
-arm_values = [[110, 40, 125], [87, 65, 120], [87, 110, 120], [110, 140, 125],
-              [150, 55, 155], [130, 80, 140], [130, 105, 140], [150, 125, 155]]
-arm_home = [180, 90, 0]
-arm_temp1 = [90, 10, 120]
-arm_temp2 = [90, 170, 120]
+arm_values = [[150,135,155] , [130,112,140] , [130, 85, 140] , [150, 60, 155],
+              [110, 148, 128] ,[87, 118, 120] , [85, 75, 125],[110, 48, 130] ]
+
+arm_home1 = [180, 0, 0]
+arm_home2 = [180, 180, 0]
+
+arm_temp1 = [90,18,120]
+arm_temp2 = [90, 175, 120]
 arm_trash = [140, 0, 140]
 
 # --- Arm Sync Operation Constants ---
@@ -123,35 +126,35 @@ async def send_arm_command_async(esp32_ws_client, degree1: int, degree2: int, de
 
     # ARM_MAX_RETRIES and ARM_RETRY_DELAY_SECONDS are already global constants
 
-    # attempt = 0
-    # while attempt < ARM_MAX_RETRIES:
-    #     attempt += 1
-    #     logging.info(f"[ESP32] Sending command (Attempt {attempt}/{ARM_MAX_RETRIES}): {command_strip}")
+    attempt = 0
+    while attempt < ARM_MAX_RETRIES:
+        attempt += 1
+        logging.info(f"[ESP32] Sending command (Attempt {attempt}/{ARM_MAX_RETRIES}): {command_strip}")
 
-    #     try:
-    #         # Assuming esp32_ws_client is an instance of ESP32Client from esp32_client.py
-    #         success = await esp32_ws_client.send_json({
-    #             "action": "command",
-    #             "command": command
-    #         }) # send_json in ESP32Client already handles JSON dumping
+        try:
+            # Assuming esp32_ws_client is an instance of ESP32Client from esp32_client.py
+            success = await esp32_ws_client.send_json({
+                "action": "command",
+                "command": command
+            }) # send_json in ESP32Client already handles JSON dumping
             
-    #         if success:
-    #             logging.info(f"[ESP32] Command '{command_strip}' sent successfully on attempt {attempt}.")
-    #             # The ESP32Client's send_command/send_json might already include a delay.
-    #             # If not, and one is strictly needed *after ESP32 processing*, it's more complex.
-    #             # The current ESP32Client has a 2s delay *after sending*.
-    #             # await asyncio.sleep(2.0) # This might be redundant if ESP32Client handles it
-    #             return True
-    #         else:
-    #             logging.error(f"[ESP32] Command '{command_strip}' failed to send on attempt {attempt} (client reported failure).")
-    #     except Exception as e:
-    #         logging.error(f"[ESP32] Error during command attempt {attempt} for '{command_strip}': {e}")
+            if success:
+                logging.info(f"[ESP32] Command '{command_strip}' sent successfully on attempt {attempt}.")
+                # The ESP32Client's send_command/send_json might already include a delay.
+                # If not, and one is strictly needed *after ESP32 processing*, it's more complex.
+                # The current ESP32Client has a 2s delay *after sending*.
+                # await asyncio.sleep(2.0) # This might be redundant if ESP32Client handles it
+                return True
+            else:
+                logging.error(f"[ESP32] Command '{command_strip}' failed to send on attempt {attempt} (client reported failure).")
+        except Exception as e:
+            logging.error(f"[ESP32] Error during command attempt {attempt} for '{command_strip}': {e}")
         
-    #     if attempt < ARM_MAX_RETRIES:
-    #         logging.info(f"[ESP32] Waiting {ARM_RETRY_DELAY_SECONDS}s before retry...")
-    #         await asyncio.sleep(ARM_RETRY_DELAY_SECONDS)
+        if attempt < ARM_MAX_RETRIES:
+            logging.info(f"[ESP32] Waiting {ARM_RETRY_DELAY_SECONDS}s before retry...")
+            await asyncio.sleep(ARM_RETRY_DELAY_SECONDS)
 
-    # logging.error(f"[ESP32] Command '{command_strip}' FAILED after {ARM_MAX_RETRIES} attempts.")
+    logging.error(f"[ESP32] Command '{command_strip}' FAILED after {ARM_MAX_RETRIES} attempts.")
     return 1
 
 # --- Asynchronous Arm Movement Logic using ESP32 WebSocket ---
@@ -173,75 +176,83 @@ async def from_to_async(esp32_ws_client, src: str, dest: str, card_id: int) -> b
             logging.debug("Seq: card -> temp1")
             if not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_temp1[0], arm_temp1[1], arm_temp1[2], 0, 0): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_temp1[0], arm_temp1[1], arm_temp1[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
         # ... (all other elif conditions for movement sequences, ensuring esp32_ws_client is passed) ...
         elif src == "card" and dest == "temp2":
             logging.debug("Seq: card -> temp2")
             if not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_temp2[0], arm_temp2[1], arm_temp2[2], 0, 0): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_temp2[0], arm_temp2[1], arm_temp2[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 0, 1): success = False
 
         elif src == "card" and dest == "trash":
             logging.debug("Seq: card -> trash")
             if not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "temp1" and dest == "trash":
             logging.debug("Seq: temp1 -> trash")
             if not await send_arm_command_async(esp32_ws_client, arm_temp1[0], arm_temp1[1], arm_temp1[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "temp2" and dest == "trash":
             logging.debug("Seq: temp2 -> trash")
             if not await send_arm_command_async(esp32_ws_client, arm_temp2[0], arm_temp2[1], arm_temp2[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "temp1" and dest == "card":
             logging.debug("Seq: temp1 -> card")
             if not await send_arm_command_async(esp32_ws_client, arm_temp1[0], arm_temp1[1], arm_temp1[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 0, 0): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            # home position depends on the card
+            if card_id == 0 or card_id == 1 or card_id == 4 or card_id == 5:
+                if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 0, 1): success = False
+            else:
+                if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "temp2" and dest == "card":
             logging.debug("Seq: temp2 -> card")
             if not await send_arm_command_async(esp32_ws_client, arm_temp2[0], arm_temp2[1], arm_temp2[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 0, 0): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            # home position depends on the card
+            if card_id == 0 or card_id == 1 or card_id == 4 or card_id == 5:
+                if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 0, 1): success = False
+            else:
+                if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "home" and dest == "home":
             logging.debug("Seq: home -> home")
-            if not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
         else:
             logging.error(f"Invalid/unhandled src/dest combination: {src} -> {dest}")
             success = False
@@ -250,7 +261,7 @@ async def from_to_async(esp32_ws_client, src: str, dest: str, card_id: int) -> b
             logging.error(f"ASYNC movement sequence FAILED: A command failed for card {card_id} ({src} -> {dest})")
             if not (src == "home" and dest == "home"):
                 logging.warning("Attempting to return arm home after sequence failure.")
-                await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1)
+                await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1)
             return False
 
         logging.info(f"ASYNC movement sequence COMPLETED successfully: card {card_id} ({src} -> {dest})")
@@ -259,7 +270,7 @@ async def from_to_async(esp32_ws_client, src: str, dest: str, card_id: int) -> b
     except Exception as e:
         logging.error(f"Unexpected error during ASYNC sequence ({src} -> {dest}, card {id}): {e}", exc_info=True)
         logging.warning("Attempting to return arm home after unexpected sequence error.")
-        await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1) # Ensure client is passed
+        await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1) # Ensure client is passed
         return False
 
 
@@ -335,7 +346,7 @@ async def from_to(websocket: WebSocket, src: str, dest: str, card_id: int) -> bo
             move_successful = False
             logging.warning(f"Attempting safe return home after error during {action_name}.")
             try:
-                await send_arm_command_async(current_esp32_client, arm_home[0], arm_home[1], arm_home[2], 0, 1)
+                await send_arm_command_async(current_esp32_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1)
             except Exception as home_e:
                 logging.error(f"Failed to return arm home after error in {action_name}: {home_e}")
 
@@ -733,26 +744,45 @@ async def run_yolo_game(websocket: WebSocket):
                     card_to_flip = choose_random_card()
                     if card_to_flip is not None:
                         logging.info(f"[{game_state_key.upper()}] State 0 -> Strategy: Flip card {card_to_flip}.")
-                        await update_frontend_state(f"Choosing card {card_to_flip}. Detecting...")
-                        detected_obj = await detect_object_at_card(card_to_flip)
-                        if detected_obj == DETECTION_PERMANENT_FAIL_STATE:
-                            logging.error(f"[{game_state_key.upper()}] PERMANENT detection failure for card {card_to_flip}. Marking unusable.")
-                            await update_frontend_state(f"Critical detection fail on {card_to_flip}. Skipping card.")
-                            card_states[card_to_flip]["isFlippedBefore"] = True; card_states[card_to_flip]["object"] = DETECTION_PERMANENT_FAIL_STATE; card_states[card_to_flip]["isMatched"] = True
-                            game_state["last_detect_fail_id"] = card_to_flip; await update_frontend_state()
-                        elif detected_obj is not None:
-                            logging.info(f"Detected '{detected_obj}'. Moving card {card_to_flip} to Temp1.")
-                            await update_frontend_state(f"Detected '{detected_obj}'. Moving card {card_to_flip} to Temp1.")
-                            success_move = await from_to(websocket, "card", "temp1", card_to_flip)
-                            if success_move:
-                                card_states[card_to_flip]["object"] = detected_obj; card_states[card_to_flip]["isFlippedBefore"] = True
-                                if detected_obj not in objects_found: objects_found[detected_obj] = []
-                                if card_to_flip not in objects_found[detected_obj]: objects_found[detected_obj].append(card_to_flip)
-                                current_flipped.append(card_to_flip); logging.info(f"Card {card_to_flip} ('{detected_obj}') in Temp1. Flipped: {current_flipped}")
-                            else: logging.error(f"[{game_state_key.upper()}] Arm fail: {card_to_flip} to Temp1."); await update_frontend_state(f"Arm fail move {card_to_flip}.")
-                            await update_frontend_state()
-                        else: logging.error(f"[{game_state_key.upper()}] detect_object_at_card returned unexpected None for card {card_to_flip}."); await update_frontend_state(f"Internal error during detection for {card_to_flip}."); game_state["last_detect_fail_id"] = card_to_flip
-                    else: logging.info(f"[{game_state_key.upper()}] State 0: No known pair & no available card to flip. Waiting."); await asyncio.sleep(1)
+                        await update_frontend_state(f"Choosing card {card_to_flip}. Moving to Temp1...")
+                        # --- MOVE FIRST, THEN DETECT ---
+                        success_move = await from_to(websocket, "card", "temp1", card_to_flip)
+                        if success_move:
+                            detected_obj = await detect_object_at_card(card_to_flip)
+                            if detected_obj == DETECTION_PERMANENT_FAIL_STATE:
+                                logging.error(f"[{game_state_key.upper()}] PERMANENT detection failure for card {card_to_flip}. Marking unusable.")
+                                await update_frontend_state(f"Critical detection fail on {card_to_flip}. Skipping card.")
+                                card_states[card_to_flip]["isFlippedBefore"] = True
+                                card_states[card_to_flip]["object"] = DETECTION_PERMANENT_FAIL_STATE
+                                card_states[card_to_flip]["isMatched"] = True
+                                game_state["last_detect_fail_id"] = card_to_flip
+                                await update_frontend_state()
+                                # Return card from temp1 to card position if detection failed
+                                await from_to(websocket, "temp1", "card", card_to_flip)
+                            elif detected_obj is not None:
+                                logging.info(f"Detected '{detected_obj}' after move. Card {card_to_flip} in Temp1.")
+                                await update_frontend_state(f"Detected '{detected_obj}' after move. Card {card_to_flip} in Temp1.")
+                                card_states[card_to_flip]["object"] = detected_obj
+                                card_states[card_to_flip]["isFlippedBefore"] = True
+                                if detected_obj not in objects_found:
+                                    objects_found[detected_obj] = []
+                                if card_to_flip not in objects_found[detected_obj]:
+                                    objects_found[detected_obj].append(card_to_flip)
+                                current_flipped.append(card_to_flip)
+                                logging.info(f"Card {card_to_flip} ('{detected_obj}') in Temp1. Flipped: {current_flipped}")
+                            else:
+                                logging.error(f"[{game_state_key.upper()}] detect_object_at_card returned unexpected None for card {card_to_flip}.")
+                                await update_frontend_state(f"Internal error during detection for {card_to_flip}.")
+                                game_state["last_detect_fail_id"] = card_to_flip
+                                # Return card from temp1 to card position if detection failed
+                                await from_to(websocket, "temp1", "card", card_to_flip)
+                        else:
+                            logging.error(f"[{game_state_key.upper()}] Arm fail: {card_to_flip} to Temp1.")
+                            await update_frontend_state(f"Arm fail move {card_to_flip}.")
+                        await update_frontend_state()
+                    else:
+                        logging.info(f"[{game_state_key.upper()}] State 0: No known pair & no available card to flip. Waiting.")
+                        await asyncio.sleep(1)
             elif len(current_flipped) == 1:
                 first_card_id = current_flipped[0]; first_object = card_states.get(first_card_id,{}).get("object", "UNKNOWN")
                 logging.info(f"[{game_state_key.upper()}] State 1: Card {first_card_id} ('{first_object}') in Temp1.")
@@ -775,25 +805,44 @@ async def run_yolo_game(websocket: WebSocket):
                     if card_to_flip is not None:
                         logging.info(f"[{game_state_key.upper()}] State 1 -> Strategy: No known match. Flipping {card_to_flip}.")
                         await update_frontend_state(f"No match for '{first_object}'. Choosing {card_to_flip}...")
-                        detected_obj = await detect_object_at_card(card_to_flip)
-                        if detected_obj == DETECTION_PERMANENT_FAIL_STATE:
-                            logging.error(f"[{game_state_key.upper()}] PERMANENT detection fail on second card {card_to_flip}.")
-                            await update_frontend_state(f"Critical detect fail {card_to_flip}. Returning first card.")
-                            card_states[card_to_flip]["isFlippedBefore"]=True; card_states[card_to_flip]["object"]=DETECTION_PERMANENT_FAIL_STATE; card_states[card_to_flip]["isMatched"]=True; game_state["last_detect_fail_id"] = card_to_flip
-                            await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
-                        elif detected_obj is not None:
-                            logging.info(f"Detected '{detected_obj}'. Moving {card_to_flip} to Temp2.")
-                            await update_frontend_state(f"Detected '{detected_obj}'. Moving {card_to_flip} to Temp2.")
-                            success_move = await from_to(websocket, "card", "temp2", card_to_flip)
-                            if success_move:
-                                card_states[card_to_flip]["object"]=detected_obj; card_states[card_to_flip]["isFlippedBefore"]=True
+                        # --- MOVE FIRST, THEN DETECT ---
+                        success_move = await from_to(websocket, "card", "temp2", card_to_flip)
+                        if success_move:
+                            detected_obj = await detect_object_at_card(card_to_flip)
+                            if detected_obj == DETECTION_PERMANENT_FAIL_STATE:
+                                logging.error(f"[{game_state_key.upper()}] PERMANENT detection fail on second card {card_to_flip}.")
+                                await update_frontend_state(f"Critical detect fail {card_to_flip}. Returning first card.")
+                                card_states[card_to_flip]["isFlippedBefore"]=True
+                                card_states[card_to_flip]["object"]=DETECTION_PERMANENT_FAIL_STATE
+                                card_states[card_to_flip]["isMatched"]=True
+                                game_state["last_detect_fail_id"] = card_to_flip
+                                await from_to(websocket, "temp1", "card", first_card_id)
+                                await from_to(websocket, "temp2", "card", card_to_flip)
+                                current_flipped.clear()
+                            elif detected_obj is not None:
+                                logging.info(f"Detected '{detected_obj}' after move. Card {card_to_flip} in Temp2.")
+                                await update_frontend_state(f"Detected '{detected_obj}' after move. Card {card_to_flip} in Temp2.")
+                                card_states[card_to_flip]["object"]=detected_obj
+                                card_states[card_to_flip]["isFlippedBefore"]=True
                                 if detected_obj not in objects_found: objects_found[detected_obj] = []
                                 if card_to_flip not in objects_found[detected_obj]: objects_found[detected_obj].append(card_to_flip)
-                                current_flipped.append(card_to_flip); logging.info(f"Card {card_to_flip} ('{detected_obj}') in Temp2. Flipped: {current_flipped}")
-                            else: logging.error(f"Arm fail card->temp2 {card_to_flip}. Returning first card."); await update_frontend_state(f"Arm fail move {card_to_flip}. Returning first card."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
-                        else: logging.error(f"Detect returned unexpected None for {card_to_flip}. Returning first."); await update_frontend_state(f"Internal error during detection for {card_to_flip}. Returning first card."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear(); game_state["last_detect_fail_id"] = card_to_flip
+                                current_flipped.append(card_to_flip)
+                                logging.info(f"Card {card_to_flip} ('{detected_obj}') in Temp2. Flipped: {current_flipped}")
+                            else:
+                                logging.error(f"Detect returned unexpected None for {card_to_flip}. Returning both cards.")
+                                await update_frontend_state(f"Internal error during detection for {card_to_flip}. Returning both cards.")
+                                await from_to(websocket, "temp1", "card", first_card_id)
+                                await from_to(websocket, "temp2", "card", card_to_flip)
+                                current_flipped.clear()
+                                game_state["last_detect_fail_id"] = card_to_flip
+                        else:
+                            logging.error(f"Arm fail card->temp2 {card_to_flip}. Returning first card.")
+                            await update_frontend_state(f"Arm fail move {card_to_flip}. Returning first card.")
+                            await from_to(websocket, "temp1", "card", first_card_id)
+                            current_flipped.clear()
                         await update_frontend_state()
-                    else: logging.warning(f"State 1: No second card available? Returning {first_card_id}."); await update_frontend_state(f"No second card found. Returning {first_card_id}."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear(); await update_frontend_state()
+                    else:
+                        logging.warning(f"State 1: No second card available? Returning {first_card_id}."); await update_frontend_state(f"No second card found. Returning {first_card_id}."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear(); await update_frontend_state()
             elif len(current_flipped) == 2:
                 card1_id, card2_id = current_flipped[0], current_flipped[1]
                 obj1, obj2 = card_states.get(card1_id,{}).get("object"), card_states.get(card2_id,{}).get("object")
@@ -963,29 +1012,51 @@ async def run_color_game(websocket: WebSocket):
                     card_to_flip = choose_random_card()
                     if card_to_flip is not None:
                         logging.info(f"[{game_state_key.upper()}] State 0 -> Strategy: Flip card {card_to_flip}.")
-                        await update_frontend_state(f"Choosing card {card_to_flip}. Detecting color...")
-                        detected_color = await detect_color_at_card(card_to_flip)
-                        if detected_color == DETECTION_PERMANENT_FAIL_STATE:
-                            logging.error(f"[{game_state_key.upper()}] PERMANENT color detect fail {card_to_flip}.")
-                            await update_frontend_state(f"Critical color detect fail {card_to_flip}. Skipping.")
-                            card_states[card_to_flip]["isFlippedBefore"]=True; card_states[card_to_flip]["color"]=DETECTION_PERMANENT_FAIL_STATE; card_states[card_to_flip]["isMatched"]=True; game_state["last_detect_fail_id"] = card_to_flip; await update_frontend_state()
-                        elif detected_color == "black":
-                            logging.warning(f"Detected black back on {card_to_flip}. Marking, not moving.")
-                            await update_frontend_state(f"Detected back of card {card_to_flip}.")
-                            card_states[card_to_flip]["isFlippedBefore"] = True; card_states[card_to_flip]["color"] = "black"; game_state["last_detect_fail_id"] = card_to_flip; await update_frontend_state()
-                        elif detected_color is not None:
-                            logging.info(f"Detected '{detected_color}'. Moving {card_to_flip} to Temp1.")
-                            await update_frontend_state(f"Detected '{detected_color}'. Moving {card_to_flip} to Temp1.")
-                            success_move = await from_to(websocket, "card", "temp1", card_to_flip)
-                            if success_move:
-                                card_states[card_to_flip]["color"]=detected_color; card_states[card_to_flip]["isFlippedBefore"]=True
+                        await update_frontend_state(f"Choosing card {card_to_flip}. Moving to Temp1...")
+                        # --- MOVE FIRST, THEN DETECT ---
+                        success_move = await from_to(websocket, "card", "temp1", card_to_flip)
+                        if success_move:
+                            detected_color = await detect_color_at_card(card_to_flip)
+                            if detected_color == DETECTION_PERMANENT_FAIL_STATE:
+                                logging.error(f"[{game_state_key.upper()}] PERMANENT color detect fail {card_to_flip}.")
+                                await update_frontend_state(f"Critical color detect fail {card_to_flip}. Skipping.")
+                                card_states[card_to_flip]["isFlippedBefore"]=True
+                                card_states[card_to_flip]["color"]=DETECTION_PERMANENT_FAIL_STATE
+                                card_states[card_to_flip]["isMatched"]=True
+                                game_state["last_detect_fail_id"] = card_to_flip
+                                await update_frontend_state()
+                                # Return card from temp1 to card position if detection failed
+                                await from_to(websocket, "temp1", "card", card_to_flip)
+                            elif detected_color == "black":
+                                logging.warning(f"Detected black back on {card_to_flip}. Marking, not moving.")
+                                await update_frontend_state(f"Detected back of card {card_to_flip}.")
+                                card_states[card_to_flip]["isFlippedBefore"] = True
+                                card_states[card_to_flip]["color"] = "black"
+                                game_state["last_detect_fail_id"] = card_to_flip
+                                await update_frontend_state()
+                                # Optionally, return card if needed
+                                await from_to(websocket, "temp1", "card", card_to_flip)
+                            elif detected_color is not None:
+                                logging.info(f"Detected '{detected_color}' after move. Card {card_to_flip} in Temp1.")
+                                await update_frontend_state(f"Detected '{detected_color}' after move. Card {card_to_flip} in Temp1.")
+                                card_states[card_to_flip]["color"]=detected_color
+                                card_states[card_to_flip]["isFlippedBefore"]=True
                                 if detected_color not in colors_found: colors_found[detected_color] = []
                                 if card_to_flip not in colors_found[detected_color]: colors_found[detected_color].append(card_to_flip)
-                                current_flipped.append(card_to_flip); logging.info(f"Card {card_to_flip} ('{detected_color}') in Temp1. Flipped: {current_flipped}")
-                            else: logging.error(f"Arm fail card->temp1 {card_to_flip}."); await update_frontend_state(f"Arm fail {card_to_flip}.")
-                            await update_frontend_state()
-                        else: logging.error(f"Detect_color returned unexpected None for {card_to_flip}."); await update_frontend_state(f"Internal error detect {card_to_flip}."); game_state["last_detect_fail_id"] = card_to_flip
-                    else: logging.info(f"State 0: No pair & no available card."); await asyncio.sleep(1)
+                                current_flipped.append(card_to_flip)
+                                logging.info(f"Card {card_to_flip} ('{detected_color}') in Temp1. Flipped: {current_flipped}")
+                            else:
+                                logging.error(f"Detect_color returned unexpected None for {card_to_flip}.")
+                                await update_frontend_state(f"Internal error detect {card_to_flip}.")
+                                game_state["last_detect_fail_id"] = card_to_flip
+                                # Return card from temp1 to card position if detection failed
+                                await from_to(websocket, "temp1", "card", card_to_flip)
+                        else:
+                            logging.error(f"Arm fail card->temp1 {card_to_flip}.")
+                            await update_frontend_state(f"Arm fail {card_to_flip}.")
+                        await update_frontend_state()
+                    else:
+                        logging.info(f"State 0: No pair & no available card."); await asyncio.sleep(1)
             elif len(current_flipped) == 1:
                 first_card_id = current_flipped[0]; first_color = card_states.get(first_card_id,{}).get("color", "UNKNOWN")
                 logging.info(f"[{game_state_key.upper()}] State 1: Card {first_card_id} ('{first_color}') in Temp1.")
@@ -1008,28 +1079,39 @@ async def run_color_game(websocket: WebSocket):
                     if card_to_flip is not None:
                         logging.info(f"State 1 -> Strategy: No known match. Flipping {card_to_flip}.")
                         await update_frontend_state(f"No match for '{first_color}'. Choosing {card_to_flip}...")
-                        detected_color = await detect_color_at_card(card_to_flip)
-                        if detected_color == DETECTION_PERMANENT_FAIL_STATE:
-                            logging.error(f"PERMANENT color detect fail {card_to_flip}. Return first."); await update_frontend_state(f"Critical detect fail {card_to_flip}. Return first.")
-                            card_states[card_to_flip]["isFlippedBefore"]=True; card_states[card_to_flip]["color"]=DETECTION_PERMANENT_FAIL_STATE; card_states[card_to_flip]["isMatched"]=True; game_state["last_detect_fail_id"] = card_to_flip
-                            await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
-                        elif detected_color == "black":
-                            logging.warning(f"Detected black back on {card_to_flip}. Return first."); await update_frontend_state(f"Detected back of {card_to_flip}. Return first.")
-                            card_states[card_to_flip]["isFlippedBefore"] = True; card_states[card_to_flip]["color"] = "black"; game_state["last_detect_fail_id"] = card_to_flip
-                            await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
-                        elif detected_color is not None:
-                            logging.info(f"Detected '{detected_color}'. Moving {card_to_flip} to Temp2.")
-                            await update_frontend_state(f"Detected '{detected_color}'. Moving {card_to_flip} to Temp2.")
-                            success_move = await from_to(websocket, "card", "temp2", card_to_flip)
-                            if success_move:
-                                card_states[card_to_flip]["color"]=detected_color; card_states[card_to_flip]["isFlippedBefore"]=True
+                        # --- MOVE FIRST, THEN DETECT ---
+                        success_move = await from_to(websocket, "card", "temp2", card_to_flip)
+                        if success_move:
+                            detected_color = await detect_color_at_card(card_to_flip)
+                            if detected_color == DETECTION_PERMANENT_FAIL_STATE:
+                                logging.error(f"PERMANENT color detect fail {card_to_flip}. Return first."); await update_frontend_state(f"Critical detect fail {card_to_flip}. Return first.")
+                                card_states[card_to_flip]["isFlippedBefore"]=True
+                                card_states[card_to_flip]["color"]=DETECTION_PERMANENT_FAIL_STATE
+                                card_states[card_to_flip]["isMatched"]=True
+                                game_state["last_detect_fail_id"] = card_to_flip
+                                await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
+                            elif detected_color == "black":
+                                logging.warning(f"Detected black back on {card_to_flip}. Return first."); await update_frontend_state(f"Detected back of {card_to_flip}. Return first.")
+                                card_states[card_to_flip]["isFlippedBefore"] = True
+                                card_states[card_to_flip]["color"] = "black"
+                                game_state["last_detect_fail_id"] = card_to_flip
+                                await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
+                            elif detected_color is not None:
+                                logging.info(f"Detected '{detected_color}' after move. Card {card_to_flip} in Temp2.")
+                                await update_frontend_state(f"Detected '{detected_color}' after move. Card {card_to_flip} in Temp2.")
+                                card_states[card_to_flip]["color"]=detected_color
+                                card_states[card_to_flip]["isFlippedBefore"]=True
                                 if detected_color not in colors_found: colors_found[detected_color] = []
                                 if card_to_flip not in colors_found[detected_color]: colors_found[detected_color].append(card_to_flip)
-                                current_flipped.append(card_to_flip); logging.info(f"Card {card_to_flip} ('{detected_color}') in Temp2. Flipped: {current_flipped}")
-                            else: logging.error(f"Arm fail card->temp2 {card_to_flip}. Return first."); await update_frontend_state(f"Arm fail {card_to_flip}. Return first."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
-                        else: logging.error(f"Detect_color returned None for {card_to_flip}. Return first."); await update_frontend_state(f"Internal error detect {card_to_flip}. Return first."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear(); game_state["last_detect_fail_id"] = card_to_flip
-                        await update_frontend_state()
-                    else: logging.warning(f"State 1: No second card available? Return {first_card_id}."); await update_frontend_state(f"No second card. Return {first_card_id}."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear(); await update_frontend_state()
+                                current_flipped.append(card_to_flip)
+                                logging.info(f"Card {card_to_flip} ('{detected_color}') in Temp2. Flipped: {current_flipped}")
+                            else:
+                                logging.error(f"Detect_color returned None for {card_to_flip}. Return first."); await update_frontend_state(f"Internal error detect {card_to_flip}. Return first."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear(); game_state["last_detect_fail_id"] = card_to_flip
+                            await update_frontend_state()
+                        else:
+                            logging.error(f"Arm fail card->temp2 {card_to_flip}. Return first."); await update_frontend_state(f"Arm fail {card_to_flip}. Return first."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear()
+                    else:
+                        logging.warning(f"State 1: No second card available? Return {first_card_id}."); await update_frontend_state(f"No second card. Return {first_card_id}."); await from_to(websocket, "temp1", "card", first_card_id); current_flipped.clear(); await update_frontend_state()
             elif len(current_flipped) == 2:
                 card1_id, card2_id = current_flipped[0], current_flipped[1]
                 color1, color2 = card_states.get(card1_id,{}).get("color"), card_states.get(card2_id,{}).get("color")
@@ -1220,5 +1302,5 @@ class MemoryMatching:
         self.running = False
         if "running" in self.game_state:
             self.game_state["running"] = False
-            
-            
+
+
