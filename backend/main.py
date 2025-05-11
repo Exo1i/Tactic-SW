@@ -82,6 +82,13 @@ async def stream_shell_game(request: Request):
     generator = shell_game_session.get_stream_generator()
     return StreamingResponse(generator, media_type="multipart/x-mixed-replace; boundary=frame")
 
+@app.get("/shell-game/debug")
+async def shell_game_debug():
+    global shell_game_session
+    if not shell_game_session:
+        return {"status": "error", "message": "Shell game not running"}
+    return shell_game_session.get_latest_debug_state()
+
 @app.websocket("/ws/{game_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str):
     global target_shooter_session, shell_game_session, memory_game_instances
@@ -125,6 +132,8 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             # Pass esp32_client to ShellGame
             shell_game_session = game_module.ShellGame(esp32_client=esp32_client)
             game_session = shell_game_session
+            # Start livefeed background task for WS
+            livefeed_task = asyncio.create_task(shell_game_session.send_livefeed_ws(websocket))
         elif game_id == "rubiks":
             # Wait for initial config message (optional)
             first_message = await websocket.receive()
@@ -234,6 +243,12 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             if hasattr(game_session, 'cleanup') and callable(game_session.cleanup):
                 try: game_session.cleanup()
                 except Exception as e: print(f"Error calling cleanup for {game_id}: {e}")
+        # Cancel livefeed task if running
+        if game_id == "shell-game":
+            try:
+                livefeed_task.cancel()
+            except Exception:
+                pass
     finally:
         print(f"Closing WebSocket connection for game_id: {game_id}")
         # Ensure game session resources are released if not already by disconnect exception block
@@ -244,6 +259,11 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             if hasattr(game_session, 'cleanup') and callable(game_session.cleanup) and not WebSocketDisconnect:  # if not already called
                 try: game_session.cleanup()
                 except Exception as e: print(f"Error calling cleanup in finally for {game_id}: {e}")
+        if game_id == "shell-game":
+            try:
+                livefeed_task.cancel()
+            except Exception:
+                pass
 
 # Helper to support both sync and async process_frame/process_command
 async def maybe_await(func, *args, **kwargs):

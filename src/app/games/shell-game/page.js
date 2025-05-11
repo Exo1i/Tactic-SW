@@ -13,6 +13,7 @@ export default function ShellGamePage() {
   const [output, setOutput] = useState(null);
   const [rawFrame, setRawFrame] = useState(null);
   const [processedFrame, setProcessedFrame] = useState(null);
+  const [livefeedFrame, setLivefeedFrame] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [cameraSettings, setCameraSettings] = useState({
     useIpCamera: false,
@@ -25,7 +26,6 @@ export default function ShellGamePage() {
 
   // Loading indicators
   const [isCameraLoading, setIsCameraLoading] = useState(false);
-  const [isBackendLoading, setIsBackendLoading] = useState(false);
 
   // Only send a new frame after backend responds
   const sendNextFrameRef = useRef(true);
@@ -35,27 +35,12 @@ export default function ShellGamePage() {
   const minFrameInterval = 30; // ms (10 FPS). Use 50 for 20 FPS.
 
   const [isGameStarted, setIsGameStarted] = useState(false);
+  const [processedStreamUrl, setProcessedStreamUrl] = useState(null);
+  const [debugState, setDebugState] = useState(null);
+  const [cupResult, setCupResult] = useState(null);
 
   useEffect(() => {
-    if (!isGameStarted) return; // Only run effect if game started
-
-    let stopped = false;
-
-    const initCamera = async () => {
-      setIsCameraLoading(true);
-      if (appliedCameraSettings.useIpCamera) {
-        if (videoRef.current && videoRef.current.srcObject) {
-          videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
-          videoRef.current.srcObject = null;
-        }
-        setTimeout(() => setIsCameraLoading(false), 1000); // crude loading for IP cam
-      } else {
-        await initializeVideoSource(videoRef.current, appliedCameraSettings);
-        setIsCameraLoading(false);
-      }
-    };
-
-    initCamera();
+    if (!isGameStarted) return;
 
     const ws = new WebSocket(`ws://localhost:8000/ws/${gameId}`);
     wsRef.current = ws;
@@ -65,10 +50,12 @@ export default function ShellGamePage() {
     ws.onerror = () => setStatus("Error");
 
     ws.onmessage = (event) => {
-      setIsBackendLoading(false);
-      sendNextFrameRef.current = true;
       try {
         const data = JSON.parse(event.data);
+        if (data.type === "livefeed" && data.payload) {
+          setLivefeedFrame(`data:image/jpeg;base64,${data.payload}`);
+          return;
+        }
         setOutput(data);
         if (data.raw_frame)
           setRawFrame(`data:image/jpeg;base64,${data.raw_frame}`);
@@ -79,59 +66,49 @@ export default function ShellGamePage() {
       }
     };
 
-    function sendFrame() {
-      if (stopped) return;
-      const now = Date.now();
-      if (!sendNextFrameRef.current) {
-        requestAnimationFrame(sendFrame);
-        return;
-      }
-      // FPS limiting: only send if enough time has passed
-      if (now - lastSentRef.current < minFrameInterval) {
-        requestAnimationFrame(sendFrame);
-        return;
-      }
-      lastSentRef.current = now;
-
-      const ws = wsRef.current;
-      const canvas = canvasRef.current;
-      let sourceEl = appliedCameraSettings.useIpCamera
-        ? ipCamImgRef.current
-        : videoRef.current;
-      if (sourceEl && canvas && ws && ws.readyState === 1) {
-        const ctx = canvas.getContext("2d");
-        try {
-          ctx.drawImage(sourceEl, 0, 0, canvas.width, canvas.height);
-          canvas.toBlob(
-            (blob) => {
-              if (blob) {
-                setIsBackendLoading(true);
-                sendNextFrameRef.current = false;
-                blob.arrayBuffer().then((buffer) => {
-                  if (ws.readyState === 1) ws.send(buffer);
-                });
-              }
-            },
-            "image/jpeg",
-            0.7
-          );
-        } catch (e) {
-          // Drawing may fail if image is not loaded yet
-        }
-      }
-      requestAnimationFrame(sendFrame);
-    }
-    sendNextFrameRef.current = true;
-    requestAnimationFrame(sendFrame);
+    setProcessedStreamUrl("http://localhost:8000/stream/shell-game");
 
     return () => {
       stopped = true;
       ws.close();
+      setProcessedStreamUrl(null);
       if (videoRef.current && videoRef.current.srcObject) {
         videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
       }
     };
   }, [gameId, appliedCameraSettings, isGameStarted]);
+
+  // Poll debug/game state from backend
+  useEffect(() => {
+    if (!isGameStarted) {
+      setDebugState(null);
+      setCupResult(null);
+      return;
+    }
+    let stopped = false;
+    async function pollDebug() {
+      while (!stopped) {
+        try {
+          const res = await fetch("http://localhost:8000/shell-game/debug");
+          if (res.ok) {
+            const data = await res.json();
+            setDebugState(data);
+            // React to game end and show result
+            if (data.status === "ended" && data.cup_name_result) {
+              setCupResult(data.cup_name_result);
+            }
+          }
+        } catch (e) {
+          setDebugState({ error: "Failed to fetch debug state" });
+        }
+        await new Promise((r) => setTimeout(r, 400)); // Poll every 400ms
+      }
+    }
+    pollDebug();
+    return () => {
+      stopped = true;
+    };
+  }, [isGameStarted]);
 
   const handleCameraSettingsChange = (newSettings) => {
     setCameraSettings(newSettings);
@@ -259,98 +236,53 @@ export default function ShellGamePage() {
             Warning: Device camera access requires HTTPS in most browsers.
           </div>
         )}
-        <h2 className="text-xl font-semibold mb-4">
-          Playing: {gameId.replace("-", " ")}
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="flex flex-col items-center">
-            <div className="mb-2 text-center font-medium">Raw Camera</div>
-            <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center">
-              {appliedCameraSettings.useIpCamera ? (
-                <img
-                  ref={ipCamImgRef}
-                  src={appliedCameraSettings.ipCameraAddress}
-                  alt="IP Camera"
-                  width={320}
-                  height={240}
-                  className="object-contain"
-                  crossOrigin="anonymous"
-                  onLoad={() => setIsCameraLoading(false)}
-                  onError={() => setStatus("IP Camera Error")}
-                />
-              ) : (
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  width={320}
-                  height={240}
-                  className="object-contain"
-                  style={{ background: "#222" }}
-                />
-              )}
-              {isCameraLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-60 text-white text-lg">
-                  Loading...
-                </div>
-              )}
-            </div>
-            <canvas
-              ref={canvasRef}
-              width={320}
-              height={240}
-              style={{ display: "none" }}
-            />
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-3">
           <div className="flex flex-col items-center">
             <div className="mb-2 text-center font-medium">
-              Raw Frame (from backend)
+              Live Cam Preview
             </div>
             <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center">
-              {rawFrame ? (
+              {livefeedFrame ? (
                 <img
-                  src={rawFrame}
+                  src={livefeedFrame}
                   width={320}
                   height={240}
-                  alt="Raw Frame"
+                  alt="Livefeed Frame"
                   className="object-contain"
                 />
               ) : (
-                <span className="text-gray-400">No frame</span>
-              )}
-              {isBackendLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-60 text-white text-lg">
-                  Processing...
-                </div>
+                <span className="text-gray-400">No livefeed</span>
               )}
             </div>
           </div>
+          
           <div className="flex flex-col items-center">
             <div className="mb-2 text-center font-medium">Processed Frame</div>
             <div className="relative w-[320px] h-[240px] rounded-lg overflow-hidden border-2 border-gray-300 bg-black flex items-center justify-center">
-              {processedFrame ? (
+              {processedStreamUrl ? (
                 <img
-                  src={processedFrame}
+                  src={processedStreamUrl}
                   width={320}
                   height={240}
-                  alt="Processed Frame"
+                  alt="Processed Stream"
                   className="object-contain"
+                  style={{ background: "#222" }}
                 />
               ) : (
                 <span className="text-gray-400">No frame</span>
-              )}
-              {isBackendLoading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-60 text-white text-lg">
-                  Processing...
-                </div>
               )}
             </div>
           </div>
         </div>
+        {cupResult && (
+          <div className="mt-6 p-4 bg-green-100 border border-green-400 rounded-lg text-center text-xl font-bold text-green-800 animate-pulse">
+            🎉 The ball is under the <span className="uppercase">{cupResult}</span> cup!
+          </div>
+        )}
         <div className="mt-6 p-4 bg-gray-50 rounded-lg border">
           <h3 className="text-lg font-medium mb-2">Game Data</h3>
           <pre className="text-sm overflow-x-auto">
-            {output ? JSON.stringify(output, null, 2) : "No data"}
+            {debugState ? JSON.stringify(debugState, null, 2) : "No data"}
           </pre>
         </div>
       </div>
