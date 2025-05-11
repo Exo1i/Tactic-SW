@@ -21,7 +21,7 @@ from utils.esp32_client import esp32_client as global_esp32_client_instance
 
 # --- Configuration ---
 # SERIAL_PORT and BAUD_RATE are no longer needed
-CAMERA_URL = 'http://192.168.49.249:4747/video' # Primary Camera URL
+CAMERA_URL = 'http://10.42.0.212:4747/video' # Primary Camera URL
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -34,7 +34,10 @@ FLIP_DELAY_SECONDS = 0.5 # Delay in game logic loops
 # --- Arm Control Values ---
 arm_values = [[110, 40, 125], [87, 65, 120], [87, 110, 120], [110, 140, 125],
               [150, 55, 155], [130, 80, 140], [130, 105, 140], [150, 125, 155]]
-arm_home = [180, 90, 0]
+
+arm_home1 = [180, 0, 0]
+arm_home2 = [180, 180, 0]
+
 arm_temp1 = [90, 10, 120]
 arm_temp2 = [90, 170, 120]
 arm_trash = [140, 0, 140]
@@ -173,75 +176,83 @@ async def from_to_async(esp32_ws_client, src: str, dest: str, card_id: int) -> b
             logging.debug("Seq: card -> temp1")
             if not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
             if success and not await send_arm_command_async(esp32_ws_client, arm_temp1[0], arm_temp1[1], arm_temp1[2], 0, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
         # ... (all other elif conditions for movement sequences, ensuring esp32_ws_client is passed) ...
         elif src == "card" and dest == "temp2":
             logging.debug("Seq: card -> temp2")
             if not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
             if success and not await send_arm_command_async(esp32_ws_client, arm_temp2[0], arm_temp2[1], arm_temp2[2], 0, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 0, 1): success = False
 
         elif src == "card" and dest == "trash":
             logging.debug("Seq: card -> trash")
             if not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
             if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "temp1" and dest == "trash":
             logging.debug("Seq: temp1 -> trash")
             if not await send_arm_command_async(esp32_ws_client, arm_temp1[0], arm_temp1[1], arm_temp1[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
             if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "temp2" and dest == "trash":
             logging.debug("Seq: temp2 -> trash")
             if not await send_arm_command_async(esp32_ws_client, arm_temp2[0], arm_temp2[1], arm_temp2[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
             if success and not await send_arm_command_async(esp32_ws_client, arm_trash[0], arm_trash[1], arm_trash[2], 0, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "temp1" and dest == "card":
             logging.debug("Seq: temp1 -> card")
             if not await send_arm_command_async(esp32_ws_client, arm_temp1[0], arm_temp1[1], arm_temp1[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
             if success and not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 0, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            # home position depends on the card
+            if card_id == 0 or card_id == 1 or card_id == 4 or card_id == 5:
+                if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 0, 1): success = False
+            else:
+                if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "temp2" and dest == "card":
             logging.debug("Seq: temp2 -> card")
             if not await send_arm_command_async(esp32_ws_client, arm_temp2[0], arm_temp2[1], arm_temp2[2], 1, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 1, 1): success = False
+            if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 1, 1): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
             if success and not await send_arm_command_async(esp32_ws_client, arm_values[card_id][0], arm_values[card_id][1], arm_values[card_id][2], 0, 0): success = False
             if success: await asyncio.sleep(ARM_SYNC_STEP_DELAY)
-            if success and not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            # home position depends on the card
+            if card_id == 0 or card_id == 1 or card_id == 4 or card_id == 5:
+                if success and not await send_arm_command_async(esp32_ws_client, arm_home2[0], arm_home2[1], arm_home2[2], 0, 1): success = False
+            else:
+                if success and not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
 
         elif src == "home" and dest == "home":
             logging.debug("Seq: home -> home")
-            if not await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1): success = False
+            if not await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1): success = False
         else:
             logging.error(f"Invalid/unhandled src/dest combination: {src} -> {dest}")
             success = False
@@ -250,7 +261,7 @@ async def from_to_async(esp32_ws_client, src: str, dest: str, card_id: int) -> b
             logging.error(f"ASYNC movement sequence FAILED: A command failed for card {card_id} ({src} -> {dest})")
             if not (src == "home" and dest == "home"):
                 logging.warning("Attempting to return arm home after sequence failure.")
-                await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1)
+                await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1)
             return False
 
         logging.info(f"ASYNC movement sequence COMPLETED successfully: card {card_id} ({src} -> {dest})")
@@ -259,7 +270,7 @@ async def from_to_async(esp32_ws_client, src: str, dest: str, card_id: int) -> b
     except Exception as e:
         logging.error(f"Unexpected error during ASYNC sequence ({src} -> {dest}, card {id}): {e}", exc_info=True)
         logging.warning("Attempting to return arm home after unexpected sequence error.")
-        await send_arm_command_async(esp32_ws_client, arm_home[0], arm_home[1], arm_home[2], 0, 1) # Ensure client is passed
+        await send_arm_command_async(esp32_ws_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1) # Ensure client is passed
         return False
 
 
@@ -335,7 +346,7 @@ async def from_to(websocket: WebSocket, src: str, dest: str, card_id: int) -> bo
             move_successful = False
             logging.warning(f"Attempting safe return home after error during {action_name}.")
             try:
-                await send_arm_command_async(current_esp32_client, arm_home[0], arm_home[1], arm_home[2], 0, 1)
+                await send_arm_command_async(current_esp32_client, arm_home1[0], arm_home1[1], arm_home1[2], 0, 1)
             except Exception as home_e:
                 logging.error(f"Failed to return arm home after error in {action_name}: {home_e}")
 
