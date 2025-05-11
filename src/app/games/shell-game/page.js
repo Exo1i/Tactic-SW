@@ -8,6 +8,7 @@ export default function ShellGamePage() {
   const canvasRef = useRef(null);
   const wsRef = useRef(null);
   const ipCamImgRef = useRef(null);
+  const ipInputRef = useRef(null);
 
   const [status, setStatus] = useState("Connecting...");
   const [output, setOutput] = useState(null);
@@ -35,6 +36,12 @@ export default function ShellGamePage() {
   const minFrameInterval = 30; // ms (10 FPS). Use 50 for 20 FPS.
 
   const [isGameStarted, setIsGameStarted] = useState(false);
+
+  useEffect(() => {
+    if (showSettings && cameraSettings.useIpCamera && ipInputRef.current) {
+      ipInputRef.current.focus();
+    }
+  }, [showSettings, cameraSettings.useIpCamera]);
 
   useEffect(() => {
     if (!isGameStarted) return; // Only run effect if game started
@@ -135,6 +142,20 @@ export default function ShellGamePage() {
 
   const handleCameraSettingsChange = (newSettings) => {
     setCameraSettings(newSettings);
+
+    // Save IP camera address to local storage
+    if (typeof newSettings.ipCameraAddress === "string") {
+      localStorage.setItem("ipCameraAddress", newSettings.ipCameraAddress);
+    }
+  };
+
+  // Helper to save IP to local storage and apply settings
+  const saveIpAndApplySettings = () => {
+    if (typeof cameraSettings.ipCameraAddress === "string") {
+      localStorage.setItem("ipCameraAddress", cameraSettings.ipCameraAddress);
+    }
+    setAppliedCameraSettings(cameraSettings);
+    setShowSettings(false);
   };
 
   // Modal overlay for settings
@@ -171,6 +192,7 @@ export default function ShellGamePage() {
                 IP Camera URL:
               </label>
               <input
+                ref={ipInputRef}
                 type="text"
                 id="ipCameraAddress"
                 value={cameraSettings.ipCameraAddress}
@@ -182,6 +204,12 @@ export default function ShellGamePage() {
                 }
                 placeholder="http://camera-ip:port/stream"
                 className="w-full p-2 border rounded"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    saveIpAndApplySettings();
+                  }
+                }}
               />
               <small className="text-gray-500">
                 Example: http://192.168.1.100:8080/video
@@ -189,10 +217,7 @@ export default function ShellGamePage() {
             </div>
           )}
           <button
-            onClick={() => {
-              setAppliedCameraSettings(cameraSettings);
-              setShowSettings(false);
-            }}
+            onClick={saveIpAndApplySettings}
             className="px-3 py-1 bg-green-500 text-white rounded hover:bg-green-600"
           >
             Apply Settings
