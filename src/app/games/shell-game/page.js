@@ -69,7 +69,6 @@ export default function ShellGamePage() {
     setProcessedStreamUrl("http://localhost:8000/stream/shell-game");
 
     return () => {
-      stopped = true;
       ws.close();
       setProcessedStreamUrl(null);
       if (videoRef.current && videoRef.current.srcObject) {
