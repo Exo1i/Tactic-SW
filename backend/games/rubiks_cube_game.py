@@ -20,6 +20,20 @@ class RubiksCubeGame:
         self.config = config or {}
         self.esp32_client = esp32_client # Store ESP32 client instance
         
+        # Switch ESP32 to RUBIK mode on game start if client is available and connected
+        if self.esp32_client and self.esp32_client.connected:
+            try:
+                # Send the switch command asynchronously but don't block constructor
+                import asyncio
+                asyncio.create_task(
+                    self.esp32_client.send_json({
+                        "action": "switch",
+                        "game": "RUBIK"
+                    })
+                )
+            except Exception as e:
+                print(f"Warning: Failed to send initial RUBIK switch command to ESP32: {e}")
+
         # Standard operational variables
         self.mode = "idle"
         self.status_message = "Ready"
@@ -219,9 +233,12 @@ class RubiksCubeGame:
 
         print(f"Sending to ESP32: '{cmd[:60]}...' (is_solution: {is_solution})")
         
-        # ESP32Client.send_command includes its own logging and a 2s delay
-        # It returns True on successful send, False otherwise.
-        success = await self.esp32_client.send_command(cmd)
+        # --- CHANGE: Always send as JSON command for Rubik's ---
+        send_payload = {
+            "action": "command",
+            "command": cmd
+        }
+        success = await self.esp32_client.send_json(send_payload)
         
         self.last_motor_move_time = time.time() # Update time of last motor command attempt
 
@@ -248,8 +265,7 @@ class RubiksCubeGame:
 
     async def _send_compound_move(self, move: str):
         if move:
-            # No explicit ACK wait here; send_esp32_command handles basic send success/failure
-            # and ESP32Client has its internal delay.
+            # --- CHANGE: Always send as JSON command for Rubik's ---
             await self.send_esp32_command(move, is_solution=False)
 
 

@@ -362,6 +362,14 @@ async def maybe_await(func, *args, **kwargs):
         return await res
     return res
 
+# --- ESP32 client connect on startup ---
+@app.on_event("startup")
+async def startup_event():
+    # Try to connect to ESP32 on startup
+    connected = await esp32_client.connect()
+    if not connected:
+        print("Warning: ESP32 client failed to connect on startup. Will retry on demand.")
+
 if __name__ == "__main__":
     print("Starting Game Backend...")
     # Ensure ESP32 client tries to connect on startup (optional, can also connect on first use)

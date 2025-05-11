@@ -415,7 +415,7 @@ export default function RubiksSolverPage() {
                             {status}
                         </span>
                          <span className={`px-3 py-1.5 rounded-full text-xs font-semibold ${gameState.serial_connected ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
-                            Arduino: {gameState.serial_connected ? "Ok" : "Off"}
+                            ESP32: {gameState.serial_connected ? "Ok" : "Off"}
                         </span>
                         <button onClick={() => setShowSettings(true)} className="px-4 py-2 bg-indigo-500 text-white text-sm font-medium rounded-md shadow-sm hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">Settings</button>
                     </div>
