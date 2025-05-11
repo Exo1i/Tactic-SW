@@ -21,7 +21,7 @@ from utils.esp32_client import esp32_client as global_esp32_client_instance
 
 # --- Configuration ---
 # SERIAL_PORT and BAUD_RATE are no longer needed
-CAMERA_URL = 'http://192.168.172.253:8080/video' # Primary Camera URL
+CAMERA_URL = 'http://192.168.2.19:4747/video' # Primary Camera URL
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -123,36 +123,36 @@ async def send_arm_command_async(esp32_ws_client, degree1: int, degree2: int, de
 
     # ARM_MAX_RETRIES and ARM_RETRY_DELAY_SECONDS are already global constants
 
-    attempt = 0
-    while attempt < ARM_MAX_RETRIES:
-        attempt += 1
-        logging.info(f"[ESP32] Sending command (Attempt {attempt}/{ARM_MAX_RETRIES}): {command_strip}")
+    # attempt = 0
+    # while attempt < ARM_MAX_RETRIES:
+    #     attempt += 1
+    #     logging.info(f"[ESP32] Sending command (Attempt {attempt}/{ARM_MAX_RETRIES}): {command_strip}")
 
-        try:
-            # Assuming esp32_ws_client is an instance of ESP32Client from esp32_client.py
-            success = await esp32_ws_client.send_json({
-                "action": "command",
-                "command": command
-            }) # send_json in ESP32Client already handles JSON dumping
+    #     try:
+    #         # Assuming esp32_ws_client is an instance of ESP32Client from esp32_client.py
+    #         success = await esp32_ws_client.send_json({
+    #             "action": "command",
+    #             "command": command
+    #         }) # send_json in ESP32Client already handles JSON dumping
             
-            if success:
-                logging.info(f"[ESP32] Command '{command_strip}' sent successfully on attempt {attempt}.")
-                # The ESP32Client's send_command/send_json might already include a delay.
-                # If not, and one is strictly needed *after ESP32 processing*, it's more complex.
-                # The current ESP32Client has a 2s delay *after sending*.
-                # await asyncio.sleep(2.0) # This might be redundant if ESP32Client handles it
-                return True
-            else:
-                logging.error(f"[ESP32] Command '{command_strip}' failed to send on attempt {attempt} (client reported failure).")
-        except Exception as e:
-            logging.error(f"[ESP32] Error during command attempt {attempt} for '{command_strip}': {e}")
+    #         if success:
+    #             logging.info(f"[ESP32] Command '{command_strip}' sent successfully on attempt {attempt}.")
+    #             # The ESP32Client's send_command/send_json might already include a delay.
+    #             # If not, and one is strictly needed *after ESP32 processing*, it's more complex.
+    #             # The current ESP32Client has a 2s delay *after sending*.
+    #             # await asyncio.sleep(2.0) # This might be redundant if ESP32Client handles it
+    #             return True
+    #         else:
+    #             logging.error(f"[ESP32] Command '{command_strip}' failed to send on attempt {attempt} (client reported failure).")
+    #     except Exception as e:
+    #         logging.error(f"[ESP32] Error during command attempt {attempt} for '{command_strip}': {e}")
         
-        if attempt < ARM_MAX_RETRIES:
-            logging.info(f"[ESP32] Waiting {ARM_RETRY_DELAY_SECONDS}s before retry...")
-            await asyncio.sleep(ARM_RETRY_DELAY_SECONDS)
+    #     if attempt < ARM_MAX_RETRIES:
+    #         logging.info(f"[ESP32] Waiting {ARM_RETRY_DELAY_SECONDS}s before retry...")
+    #         await asyncio.sleep(ARM_RETRY_DELAY_SECONDS)
 
-    logging.error(f"[ESP32] Command '{command_strip}' FAILED after {ARM_MAX_RETRIES} attempts.")
-    return False
+    # logging.error(f"[ESP32] Command '{command_strip}' FAILED after {ARM_MAX_RETRIES} attempts.")
+    return 1
 
 # --- Asynchronous Arm Movement Logic using ESP32 WebSocket ---
 async def from_to_async(esp32_ws_client, src: str, dest: str, card_id: int) -> bool:
@@ -633,10 +633,10 @@ async def run_yolo_game(websocket: WebSocket):
         logging.info(f"[{game_state_key.upper()}] Using ESP32 client: {current_esp32_client}")
 
 
-    if yolo_model_global is None:
-        logging.error(f"[{game_state_key.upper()}] YOLO Model not loaded. Cannot start."); game_state["running"] = False
-        if websocket.client_state == WebSocketState.CONNECTED: await websocket.send_json({"type": "error", "payload": "YOLO model missing."})
-        return
+    # if yolo_model_global is None:
+        # logging.error(f"[{game_state_key.upper()}] YOLO Model not loaded. Cannot start."); game_state["running"] = False
+        # if websocket.client_state == WebSocketState.CONNECTED: await websocket.send_json({"type": "error", "payload": "YOLO model missing."})
+        # return
 
     game_state.update({
         "card_states": {i: {"isFlippedBefore": False, "object": None, "isMatched": False} for i in range(CARD_COUNT)},
@@ -822,11 +822,13 @@ async def run_yolo_game(websocket: WebSocket):
                 if len(current_flipped)>0 and card_states.get(current_flipped[0], {}).get("object"): await from_to(websocket, "temp1", "card", current_flipped[0])
                 if len(current_flipped)>1 and card_states.get(current_flipped[1], {}).get("object"): await from_to(websocket, "temp2", "card", current_flipped[1])
                 current_flipped.clear(); await update_frontend_state()
-
-            if game_state.get("pairs_found", 0) >= CARD_COUNT // 2:
-                logging.info(f"[{game_state_key.upper()}] Game Finished! All pairs found.")
-                if websocket.client_state == WebSocketState.CONNECTED: await update_frontend_state(); await websocket.send_json({"type": "game_over", "payload": "Congratulations! All pairs found."})
-                game_state["running"] = False; await asyncio.sleep(1.0); break
+                if game_state.get("pairs_found", 0) >= 4:
+                    print(f"[{game_state_key.upper()}] Game Finished! All pairs found.")
+                    if websocket.client_state == WebSocketState.CONNECTED:
+                        await websocket.send_json({"type": "game_over", "payload": "All pairs found!"})
+                    game_state["running"] = False
+                    await asyncio.sleep(1.0)
+                    break
     except WebSocketDisconnect: logging.info(f"[{game_state_key.upper()}] WS disconnected."); game_state["running"] = False
     except asyncio.CancelledError: logging.info(f"[{game_state_key.upper()}] Task cancelled."); game_state["running"] = False
     except Exception as e:
@@ -1059,8 +1061,11 @@ async def run_color_game(websocket: WebSocket):
 
             if game_state.get("pairs_found", 0) >= CARD_COUNT // 2:
                 logging.info(f"[{game_state_key.upper()}] Game Finished! All pairs found.")
-                if websocket.client_state == WebSocketState.CONNECTED: await update_frontend_state(); await websocket.send_json({"type": "game_over", "payload": "Congratulations! All pairs found."})
-                game_state["running"] = False; await asyncio.sleep(1.0); break
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_json({"type": "game_over", "payload": "All pairs found!"})
+                game_state["running"] = False
+                await asyncio.sleep(1.0)
+                break
     except WebSocketDisconnect: logging.info(f"[{game_state_key.upper()}] WS disconnected."); game_state["running"] = False
     except asyncio.CancelledError: logging.info(f"[{game_state_key.upper()}] Task cancelled."); game_state["running"] = False
     except Exception as e:
@@ -1107,10 +1112,15 @@ class MemoryMatching:
         }
         # Add reference to game lock
         self.game_lock = asyncio.Lock()
+        print(f"MemoryMatching initialized with mode: {self.mode}")
+        
+        if self.mode == "yolo":
+            asyncio.create_task(self._ensure_init())
         
     async def _ensure_init(self):
         global yolo_model_global
         if self.mode == "yolo" and yolo_model_global is None:
+            print("Loading YOLO model on startup...")
             await load_yolo_model_on_startup()
         self._initialized = True
 
@@ -1210,3 +1220,5 @@ class MemoryMatching:
         self.running = False
         if "running" in self.game_state:
             self.game_state["running"] = False
+            
+            
