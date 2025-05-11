@@ -500,7 +500,9 @@ class GameSession:
                 "game_completed": self.game_completed,
                 "status_message": self.status_message,
                 "grid_shapes": self.grid_shapes if self.grid_shapes else [["Unknown"] * 4, ["Unknown"] * 4],
-                "required_swaps": self.required_swaps,
+                "required_swaps": self.required_swaps,  # Keep for debugging
+                "total_swaps": len(self.required_swaps),
+                "next_swap": self.required_swaps[0] if self.required_swaps else None,
                 "current_move": self.current_move
             }
             
@@ -533,7 +535,12 @@ class GameSession:
                     self.status_message = f"Game started! {len(self.required_swaps)} swaps needed."
                 else:
                     self.status_message = "Game started! Shapes appear in order or no valid swaps found."
-                return {"status": "ok", "message": "Game started"}
+                return {
+                    "status": "ok",
+                    "message": "Game started",
+                    "total_swaps": len(self.required_swaps),
+                    "next_swap": self.required_swaps[0] if self.required_swaps else None,
+                }
                 
             elif action == "reset_game":
                 self.game_started = False
@@ -542,7 +549,12 @@ class GameSession:
                 self.current_move = None
                 self.grid_shapes = [["Unknown" for _ in range(self.GRID_COLS)] for _ in range(self.GRID_ROWS)]
                 self.status_message = "Game reset. Position the board to start again."
-                return {"status": "ok", "message": "Game reset"}
+                return {
+                    "status": "ok",
+                    "message": "Game reset",
+                    "total_swaps": 0,
+                    "next_swap": None,
+                }
                 
             elif action == "execute_swap":
                 if not self.game_started:
@@ -581,11 +593,21 @@ class GameSession:
                     else:
                         self.status_message = f"{len(self.required_swaps)} swaps remaining"
                     
-                    return {"status": "ok", "message": "Swap executed successfully"}
+                    return {
+                        "status": "ok",
+                        "message": "Swap executed successfully",
+                        "total_swaps": len(self.required_swaps),
+                        "next_swap": self.required_swaps[0] if self.required_swaps else None,
+                    }
                 else:
                     self.current_move = None
                     self.status_message = "Failed to execute swap"
-                    return {"status": "error", "message": "Failed to execute swap"}
+                    return {
+                        "status": "error",
+                        "message": "Failed to execute swap",
+                        "total_swaps": len(self.required_swaps),
+                        "next_swap": self.required_swaps[0] if self.required_swaps else None,
+                    }
                     
             elif action == "get_state":
                 return {
@@ -596,6 +618,8 @@ class GameSession:
                     "status_message": self.status_message,
                     "grid_shapes": self.grid_shapes if self.grid_shapes else [["Unknown"] * 4, ["Unknown"] * 4],
                     "required_swaps": self.required_swaps,
+                    "total_swaps": len(self.required_swaps),
+                    "next_swap": self.required_swaps[0] if self.required_swaps else None,
                     "current_move": self.current_move
                 }
             

@@ -17,11 +17,11 @@ export default function SortingGamePage() {
   const [showSettings, setShowSettings] = useState(false);
   const [cameraSettings, setCameraSettings] = useState({
     useIpCamera: false,
-    ipCameraAddress: "",
+    ipCameraAddress: "http://192.168.137.178:4747/video",
   });
   const [appliedCameraSettings, setAppliedCameraSettings] = useState({
     useIpCamera: false,
-    ipCameraAddress: "",
+    ipCameraAddress: "http://192.168.137.178:4747/video",
   });
 
   // Game states
@@ -37,6 +37,8 @@ export default function SortingGamePage() {
   ]);
   const [requiredSwaps, setRequiredSwaps] = useState([]);
   const [currentMove, setCurrentMove] = useState(null);
+  const [totalSwaps, setTotalSwaps] = useState(0);
+  const [nextSwap, setNextSwap] = useState(null);
 
   // Loading indicators
   const [isCameraLoading, setIsCameraLoading] = useState(false);
@@ -163,6 +165,15 @@ export default function SortingGamePage() {
         ) {
           setGridShapes([[...data.grid_shapes[0]], [...data.grid_shapes[1]]]);
         }
+
+        // Update swaps info from backend
+        if (typeof data.total_swaps === "number")
+          setTotalSwaps(data.total_swaps);
+        if (data.next_swap !== undefined) setNextSwap(data.next_swap);
+
+        // For compatibility, still update requiredSwaps for highlighting
+        if (Array.isArray(data.required_swaps))
+          setRequiredSwaps(data.required_swaps);
       } catch (error) {
         // ...existing error handling...
       }
@@ -274,8 +285,17 @@ export default function SortingGamePage() {
   };
 
   const handleExecuteSwap = () => {
-    if (wsRef.current && wsRef.current.readyState === 1) {
+    if (
+      wsRef.current &&
+      wsRef.current.readyState === 1 &&
+      nextSwap &&
+      !isGameResetting &&
+      gameStarted &&
+      !gameCompleted
+    ) {
       wsRef.current.send(JSON.stringify({ action: "execute_swap" }));
+      // Optimistically disable the button until backend responds
+      setNextSwap(null);
     }
   };
 
@@ -546,25 +566,7 @@ export default function SortingGamePage() {
               </>
             )}
           </button>
-          <button
-            onClick={handleExecuteSwap}
-            disabled={
-              !gameStarted ||
-              gameCompleted ||
-              requiredSwaps.length === 0 ||
-              isGameResetting
-            }
-            className={`px-4 py-2 ${
-              !gameStarted ||
-              gameCompleted ||
-              requiredSwaps.length === 0 ||
-              isGameResetting
-                ? "bg-gray-400 cursor-not-allowed"
-                : "bg-blue-600 hover:bg-blue-700"
-            } text-white rounded`}
-          >
-            Execute Swap ({requiredSwaps.length})
-          </button>
+
           <button
             onClick={handleResetGame}
             disabled={isGameResetting}
@@ -602,6 +604,19 @@ export default function SortingGamePage() {
               "Reset Game"
             )}
           </button>
+        </div>
+
+        {/* Swaps Info */}
+        <div className="mb-4">
+          <span className="text-sm text-gray-700">
+            Total Swaps Needed: <b>{totalSwaps}</b>
+          </span>
+          {nextSwap && (
+            <span className="ml-4 text-sm text-blue-700">
+              Next Swap: ({nextSwap[0][0]}, {nextSwap[0][1]}) → (
+              {nextSwap[1][0]}, {nextSwap[1][1]})
+            </span>
+          )}
         </div>
 
         {/* Add explicit board detection button for troubleshooting */}
