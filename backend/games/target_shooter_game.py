@@ -536,9 +536,9 @@ class GameSession:
                 center_x = (x1 + x2) // 2
                 center_y = (y1 + y2) // 2
 
-                if self.is_at_initial_position and self._is_balloon_already_shot(center_x, center_y):
-                    print(f"Skipping balloon at ({center_x}, {center_y}) - already shot")
-                    continue
+                # if self.is_at_initial_position and self._is_balloon_already_shot(center_x, center_y):
+                #     print(f"Skipping balloon at ({center_x}, {center_y}) - already shot")
+                #     continue
 
                 error_x_calc, error_y_calc = self._calculate_error(center_x, center_y)
                 target_pan_for_check, target_tilt_for_check = self._calculate_new_angles(error_x_calc, error_y_calc)
@@ -588,7 +588,7 @@ class GameSession:
             self.last_movement_time = current_time
             center_x, center_y = best_target['pos']
             if self.is_at_initial_position:
-                 current_target_initial_coords = best_target['initial_coords']
+                 self.current_target_initial_coords = best_target['initial_coords']
         
             error_x, error_y = self._calculate_error(center_x, center_y)
             
@@ -605,11 +605,11 @@ class GameSession:
                         status_message = "SHOOT command sent."
                         if self.wait_for_ack():
                             status_message = "Balloon shot! ACK received."
-                            if current_target_initial_coords is not None:
-                                self.shot_balloons.append(current_target_initial_coords)
-                                print(f"Stored initial coords: {current_target_initial_coords}")
+                            if self.current_target_initial_coords is not None:
+                                self.shot_balloons.append(self.current_target_initial_coords)
+                                print(f"Stored initial coords: {self.current_target_initial_coords}")
                     
-                            current_target_initial_coords = None
+                            self.current_target_initial_coords = None
                                                             
                             print("Returning to initial position...")
                             self.current_pan, self.current_tilt = INIT_PAN, INIT_TILT

@@ -14,6 +14,8 @@ class ESP32Client:
         self.connected = False
         self.reconnect_task = None
         self.message_handlers = []
+        self.shoot_ack_event = asyncio.Event()
+        self.last_shoot_ack_message: Optional[Dict[str, Any]] = None
         
     async def connect(self):
         """Connect to the ESP32 WebSocket server"""
@@ -45,11 +47,6 @@ class ESP32Client:
         try:
             await self.websocket.send(command)
             logger.info(f"Sent command to ESP32: {command}")
-            
-            # Add a 2-second delay after sending each command
-            logger.info("Waiting 2 seconds for ESP32 to process command...")
-            await asyncio.sleep(2)
-            
             return True
         except Exception as e:
             logger.error(f"Failed to send command to ESP32: {e}")
@@ -60,6 +57,35 @@ class ESP32Client:
     async def send_json(self, data: Dict[str, Any]):
         """Send JSON data to the ESP32"""
         return await self.send_command(json.dumps(data))
+
+    async def send_json_for_shoot_and_wait_ack(self, data: Dict[str, Any], timeout: float = 5.0) -> bool:
+        """Sends JSON data (expected to be a SHOOT command) and waits for a specific SHOOT ACK."""
+        if not await self.ensure_connection():
+            logger.error("Cannot send SHOOT command - not connected to ESP32")
+            return False
+            
+        command_to_send = json.dumps(data)
+        self.shoot_ack_event.clear() 
+        self.last_shoot_ack_message = None
+
+        try:
+            await self.websocket.send(command_to_send)
+            logger.info(f"Sent SHOOT command to ESP32: {command_to_send}, awaiting ACK...")
+            
+            await asyncio.wait_for(self.shoot_ack_event.wait(), timeout=timeout)
+            logger.info(f"SHOOT ACK event received. ACK message: {self.last_shoot_ack_message}")
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout waiting for SHOOT ACK from ESP32 after {timeout}s.")
+            return False
+        except websockets.exceptions.ConnectionClosed:
+            logger.error("Connection closed while sending SHOOT command or waiting for ACK.")
+            self.connected = False
+            await self._schedule_reconnect()
+            return False
+        except Exception as e:
+            logger.error(f"Failed to send SHOOT command or wait for ACK: {e}")
+            return False
     
     async def _receive_messages(self):
         """Background task to receive messages from ESP32"""
@@ -67,10 +93,22 @@ class ESP32Client:
             return
             
         try:
-            async for message in self.websocket:
-                logger.info(f"Received from ESP32: {message}")
+            async for message_str in self.websocket:
+                logger.info(f"Received from ESP32: {message_str}")
+                try:
+                    message_data = json.loads(message_str)
+                    if isinstance(message_data, dict) and \
+                       message_data.get("type") == "ack" and \
+                       message_data.get("command") == "SHOOT":
+                        logger.info("Received SHOOT ACK from ESP32.")
+                        self.last_shoot_ack_message = message_data
+                        self.shoot_ack_event.set()
+                        continue # ACK handled, don't pass to generic handlers
+                except json.JSONDecodeError:
+                    logger.debug("Received non-JSON message from ESP32 or message not an ACK.")
+                
                 for handler in self.message_handlers:
-                    await handler(message)
+                    await handler(message_str) 
         except websockets.exceptions.ConnectionClosed:
             logger.warning("ESP32 WebSocket connection closed")
             self.connected = False
