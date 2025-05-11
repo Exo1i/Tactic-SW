@@ -1,11 +1,11 @@
 # games/rubiks_cube_game.py
 
-from typing import Optional, Dict, Any, List, Tuple # Added List, Tuple
-import serial # type: ignore
+from typing import Optional, Dict, Any
+import serial
 import time
 import cv2
 import numpy as np
-import kociemba # type: ignore
+import kociemba
 import json
 import base64
 import os
@@ -53,12 +53,12 @@ class RubiksCubeGame:
         # Scanning variables
         self.current_scan_idx = 0
         self.SCAN_COOLDOWN: float = float(self.config.get('scan_cooldown', 0.5))
-        self.MOTOR_STABILIZATION_TIME: float = float(self.config.get('motor_stabilization_time', 1.5))
+        self.MOTOR_STABILIZATION_TIME: float = float(self.config.get('motor_stabilization_time', 0.5))
         self.STABILITY_THRESHOLD: int = self.config.get('stability_threshold', 2)
         self.stability_counter: int = 0
         self.last_scan_time: float = time.time()
-        self.prev_face_colors_scan: Optional[List[str]] = None # Type hint
-        self.u_scans: List[List[str]] = [[] for _ in range(12)] # Type hint
+        self.prev_face_colors_scan: Optional[list] = None
+        self.u_scans: list = [[] for _ in range(12)]
         self.rotation_sequence: list = self.config.get('rotation_sequence', [
             "", "R L'", "B F'", "R L'", "B F'", "R L'", "B F'", "R L'", "B F'", "R L'", "B F'", "R L'"
         ])
@@ -74,7 +74,7 @@ class RubiksCubeGame:
         self.init_serial()
 
         # Color detection
-        self.color_ranges: Dict[str, List[Tuple[np.ndarray, np.ndarray]]] = self._load_color_ranges_from_file() # type: ignore
+        self.color_ranges: Dict[str, list] = self._load_color_ranges_from_file()
         if not self.color_ranges:
             print("Using default color ranges for STICKERLESS CUBE.")
             self.color_ranges = {
@@ -142,7 +142,7 @@ class RubiksCubeGame:
     def set_zoom_crop_factor(self, factor: float):
         original_factor = factor
         if factor < 1.0: factor = 1.0
-        elif factor > 10.0: factor = 10.0 # Corrected from 1.0, means it's clamped between 1 and 10
+        elif factor > 10.0: factor = 10.0
         if original_factor != factor:
             print(f"Info: Zoom crop factor ({original_factor}) corrected to {factor}.")
             
@@ -312,8 +312,6 @@ class RubiksCubeGame:
         except Exception as e:
             self.error_message = f"Frame proc error: {type(e).__name__} - {e}"
             print(f"! CRITICAL ERROR in process_frame: {self.error_message}")
-            # import traceback # Optional: for more detailed server-side error logging
-            # traceback.print_exc()
             error_display_frame = np.zeros((self.WINDOW_SIZE[1], self.WINDOW_SIZE[0], 3), dtype=np.uint8)
             cv2.putText(error_display_frame, "ERROR", (self.WINDOW_SIZE[0]//2 - 50, self.WINDOW_SIZE[1]//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
             _, buffer = cv2.imencode('.jpg', error_display_frame)
@@ -367,9 +365,9 @@ class RubiksCubeGame:
             area = cv2.contourArea(contour)
             if self.MIN_CONTOUR_AREA < area < self.MAX_CONTOUR_AREA: 
                 peri = cv2.arcLength(contour, True)
-                approx = cv2.approxPolyDP(contour, 0.03 * peri, True) # Simpler approximation for candidate selection
+                approx = cv2.approxPolyDP(contour, 0.03 * peri, True) 
                 
-                if len(approx) >= 4 and len(approx) <= 12: # Allow more vertices for initial complex shapes
+                if len(approx) >= 4 and len(approx) <= 8: 
                     x, y, w, h = cv2.boundingRect(approx)
                     if w == 0 or h == 0: continue
                     aspect_ratio = float(w) / h
@@ -378,129 +376,67 @@ class RubiksCubeGame:
                     hull_area = cv2.contourArea(hull)
                     solidity = float(area) / hull_area if hull_area > 0 else 0.0
 
-                    # Looser criteria here, stricter checks with auto-squaring later
-                    if 0.60 < aspect_ratio < 1.40 and solidity > 0.65: 
+                    if 0.70 < aspect_ratio < 1.30 and solidity > 0.70: # Initial general filter
                         if area > max_area_found: 
                             max_area_found = area
-                            # Store the *original contour* or its hull if `approx` is too simple for `_detect_corners`
-                            # Using `approx` is fine as `_detect_corners` will use its hull.
-                            best_contour_approx = approx
+                            best_contour_approx = approx 
         return best_contour_approx
 
     def _detect_corners(self, contour_approx: Optional[np.ndarray]) -> Optional[np.ndarray]:
         if contour_approx is None: return None
         
-        # Use convex hull for more robust corner detection from potentially complex contour_approx
-        hull = cv2.convexHull(contour_approx)
-        
-        # Attempt to simplify the hull to 4 points
-        epsilon_hull = 0.05 * cv2.arcLength(hull, True) 
-        approx_hull = cv2.approxPolyDP(hull, epsilon_hull, True)
-        
-        corners = None
-        if len(approx_hull) == 4:
-            corners = approx_hull.reshape(4,2).astype(np.float32)
+        if len(contour_approx) == 4:
+            corners = contour_approx.reshape(4, 2).astype(np.float32)
         else:
-            # Fallback to minAreaRect of the hull if approxPolyDP doesn't yield 4 points
-            rect = cv2.minAreaRect(hull) 
-            corners = cv2.boxPoints(rect).astype(np.float32)
+            hull = cv2.convexHull(contour_approx)
+            epsilon_hull = 0.05 * cv2.arcLength(hull, True) 
+            approx_hull = cv2.approxPolyDP(hull, epsilon_hull, True)
+            if len(approx_hull) == 4:
+                corners = approx_hull.reshape(4,2).astype(np.float32)
+            else:
+                rect = cv2.minAreaRect(hull) 
+                corners = cv2.boxPoints(rect).astype(np.float32)
         
-        if corners is None or corners.shape[0] != 4 : return None # Should ideally not happen if minAreaRect is used
-        if self.current_frame_for_detection is None: return None # Should not happen if called from process_frame
+        if self.current_frame_for_detection is None: return None
         
         gray = cv2.cvtColor(self.current_frame_for_detection, cv2.COLOR_BGR2GRAY)
         h_img, w_img = gray.shape[:2]
 
-        # Clip corners to image boundaries before refinement
         for i in range(corners.shape[0]): 
             corners[i, 0] = np.clip(corners[i, 0], 0, w_img - 1)
             corners[i, 1] = np.clip(corners[i, 1], 0, h_img - 1)
         
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
         try:
-            # Ensure corners are float32 and contiguous for cornerSubPix
             corners_float32 = np.ascontiguousarray(corners, dtype=np.float32)
             refined_corners = cv2.cornerSubPix(gray, corners_float32, (5, 5), (-1,-1), criteria) 
         except cv2.error: 
-            # print("Warning: cv2.error in cornerSubPix. Using unrefined corners.")
-            refined_corners = corners # Use unrefined if subpixel fails
+            refined_corners = corners 
 
-        # Clip refined corners again
         for i in range(refined_corners.shape[0]): 
             refined_corners[i, 0] = np.clip(refined_corners[i, 0], 0, w_img - 1)
             refined_corners[i, 1] = np.clip(refined_corners[i, 1], 0, h_img - 1)
         
-        # Order corners: tl, tr, br, bl
         pts_sorted_y = refined_corners[np.argsort(refined_corners[:, 1])] 
         top_pts = pts_sorted_y[:2][np.argsort(pts_sorted_y[:2, 0])] 
         bottom_pts = pts_sorted_y[2:][np.argsort(pts_sorted_y[2:, 0])] 
         ordered_corners = np.array([top_pts[0], top_pts[1], bottom_pts[1], bottom_pts[0]], dtype=np.float32)
         return ordered_corners
 
-    def _force_ideal_square_from_detected_corners(self, corners: np.ndarray) -> Optional[np.ndarray]:
-        if corners is None or not isinstance(corners, np.ndarray) or corners.shape != (4, 2):
-            return None
-
-        rect = cv2.minAreaRect(corners) 
-        box_center = np.array(rect[0], dtype=np.float32)
-        rect_width, rect_height = rect[1]
-        angle_deg = rect[2]
-
-        ideal_side = (rect_width + rect_height) / 2.0
-
-        min_sensible_side = max(30.0, np.sqrt(self.MIN_CONTOUR_AREA) * 0.5) 
-        if ideal_side < min_sensible_side :
-            # print(f"Debug: Ideal side {ideal_side:.1f} (from {rect_width:.1f}x{rect_height:.1f}) < min {min_sensible_side:.1f}. AutoSq Reject.")
-            return None
-        
-        max_sensible_side = np.sqrt(self.MAX_CONTOUR_AREA) * 1.2 
-        if ideal_side > max_sensible_side:
-            # print(f"Debug: Ideal side {ideal_side:.1f} > max {max_sensible_side:.1f}. AutoSq Clamp.")
-            ideal_side = max_sensible_side
-
-        angle_rad = np.deg2rad(angle_deg)
-        cos_a = np.cos(angle_rad)
-        sin_a = np.sin(angle_rad)
-        half_side = ideal_side / 2.0
-        
-        canonical_pts_at_origin = np.array([
-            [-half_side, -half_side], [half_side, -half_side],
-            [half_side, half_side], [-half_side, half_side]
-        ], dtype=np.float32)
-        
-        new_corners = np.zeros((4, 2), dtype=np.float32)
-        for i, pt_orig in enumerate(canonical_pts_at_origin):
-            x_rot = pt_orig[0] * cos_a - pt_orig[1] * sin_a
-            y_rot = pt_orig[0] * sin_a + pt_orig[1] * cos_a
-            new_corners[i, 0] = x_rot + box_center[0]
-            new_corners[i, 1] = y_rot + box_center[1]
-            
-        img_h, img_w = self.WINDOW_SIZE[1], self.WINDOW_SIZE[0]
-        new_corners[:, 0] = np.clip(new_corners[:, 0], 0, img_w - 1)
-        new_corners[:, 1] = np.clip(new_corners[:, 1], 0, img_h - 1)
-        
-        return new_corners
-
     def _predict_square_length(self, corners: Optional[np.ndarray]) -> int:
         if corners is None or len(corners) != 4: return 50 
         dists = [np.linalg.norm(corners[i] - corners[(i + 1) % 4]) for i in range(4)]
         avg_len = int(np.mean(dists))
-        return max(30, avg_len) # Ensure a minimum size for the warped image
+        return max(30, avg_len)
 
-    def _perspective_transform(self, frame_to_transform: np.ndarray, detected_corners: np.ndarray) -> Optional[np.ndarray]:
-        # Parameter `detected_corners` is now the primary input for corners.
-        if detected_corners is None or detected_corners.shape != (4,2) : return None
-        
-        # predict_square_length calculates the side length of the target square based on the input corners' side lengths.
-        # If detected_corners are already an ideal square, this will correctly use that side length.
-        side_length = self._predict_square_length(detected_corners)
-        if side_length < 20: # If predicted side length is too small, warp might be meaningless
-            # print(f"Warning: Perspective transform predicted side length {side_length} too small.")
-            return None 
-            
+    def _perspective_transform(self, frame_to_transform: np.ndarray, contour_approx: np.ndarray) -> Optional[np.ndarray]:
+        corners = self._detect_corners(contour_approx)
+        if corners is None: return None
+        side_length = self._predict_square_length(corners)
+        if side_length < 20: return None
         dst_points = np.array([[0,0], [side_length-1,0], [side_length-1,side_length-1], [0,side_length-1]], dtype=np.float32)
         try:
-            transform_matrix = cv2.getPerspectiveTransform(detected_corners, dst_points)
+            transform_matrix = cv2.getPerspectiveTransform(corners, dst_points)
             warped_image = cv2.warpPerspective(frame_to_transform, transform_matrix, (side_length, side_length), flags=cv2.INTER_LANCZOS4)
             return warped_image
         except cv2.error as e:
@@ -562,6 +498,7 @@ class RubiksCubeGame:
             cv2.putText(display_frame, instruction, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
         else: 
             cv2.putText(display_frame, "Calibration Complete! Saved.", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # self.status_message will reflect this state from capture_color
         return display_frame
 
     def _process_scanning_step(self, display_frame_overlay: np.ndarray) -> np.ndarray:
@@ -575,10 +512,9 @@ class RubiksCubeGame:
         
         is_shape_acceptable_for_scan = False 
         scan_debug_info = "" 
-        corners_for_transform = None
 
         if cube_detected_initial:
-            cv2.drawContours(display_frame_overlay, [best_contour_approx], -1, (0, 255, 0), 1) # Green for original contour
+            cv2.drawContours(display_frame_overlay, [best_contour_approx], -1, (0, 255, 0), 1)
             x_c, y_c, w_c, h_c = cv2.boundingRect(best_contour_approx)
             if w_c > 0 and h_c > 0: 
                 cell_w, cell_h = w_c // 3, h_c // 3
@@ -587,49 +523,18 @@ class RubiksCubeGame:
                     cv2.line(display_frame_overlay, (x_c + i * cell_w, y_c), (x_c + i * cell_w, y_c + h_c), (0,80,0),1)
 
             num_vertices = len(best_contour_approx)
-            aspect_ratio_br = float(w_c) / h_c if h_c > 0 else 0.0
+            aspect_ratio_br = float(w_c) / h_c if h_c > 0 else 0
+            corners = self._detect_corners(best_contour_approx) # Attempt to get 4 corners
             
-            detected_quad_corners = self._detect_corners(best_contour_approx)
-            
-            scan_debug_info = f"Orig(V:{num_vertices}, ARbr:{aspect_ratio_br:.2f}, QuadCrns:{'4' if detected_quad_corners is not None and len(detected_quad_corners)==4 else 'No'})"
-
-            if detected_quad_corners is not None and len(detected_quad_corners) == 4:
-                q_x, q_y, q_w, q_h = cv2.boundingRect(detected_quad_corners.astype(np.int32))
-                q_ar = float(q_w)/q_h if q_h > 0 else 0.0
-                q_area = cv2.contourArea(detected_quad_corners.astype(np.int32))
-
-                is_quad_good_enough = (0.85 < q_ar < 1.15 and 
-                                       self.MIN_CONTOUR_AREA * 0.7 < q_area < self.MAX_CONTOUR_AREA * 1.3)
-
-                if is_quad_good_enough:
-                    is_shape_acceptable_for_scan = True
-                    corners_for_transform = detected_quad_corners
-                    scan_debug_info += " (Quad OK)"
-                else:
-                    scan_debug_info += f" (Quad not ideal AR:{q_ar:.2f} Area:{q_area}, try ForceSq)"
-                    forced_corners = self._force_ideal_square_from_detected_corners(detected_quad_corners)
-                    if forced_corners is not None:
-                        fc_x, fc_y, fc_w, fc_h = cv2.boundingRect(forced_corners.astype(np.int32))
-                        fc_ar = float(fc_w)/fc_h if fc_h > 0 else 0.0
-                        fc_area = cv2.contourArea(forced_corners.astype(np.int32))
-
-                        if (0.80 < fc_ar < 1.20 and 
-                            self.MIN_CONTOUR_AREA * 0.5 < fc_area < self.MAX_CONTOUR_AREA * 1.5):
-                            is_shape_acceptable_for_scan = True
-                            corners_for_transform = forced_corners
-                            cv2.drawContours(display_frame_overlay, [forced_corners.astype(np.int32)], -1, (255, 0, 255), 1) # Magenta for forced
-                            scan_debug_info += " (ForceSq OK)"
-                        else:
-                            is_shape_acceptable_for_scan = False
-                            scan_debug_info += f" (ForceSq REJ AR:{fc_ar:.2f} Area:{fc_area})"
-                    else:
-                        is_shape_acceptable_for_scan = False
-                        scan_debug_info += " (ForceSq FAIL)"
-            else: # detected_quad_corners was None or not 4 points
-                is_shape_acceptable_for_scan = False
+            # Stricter shape validation for scanning
+            if (4 <= num_vertices <= 6 and          # Allow some variation from perfect 4 vertices
+                0.75 < aspect_ratio_br < 1.25 and   # Bounding rect aspect ratio close to 1
+                corners is not None and len(corners) == 4): # Must resolve to 4 corners for warp
+                is_shape_acceptable_for_scan = True
+            else:
+                scan_debug_info = f"(V:{num_vertices}, AR:{aspect_ratio_br:.2f}, C:{corners is not None})"
         
-        # Stability check based on the original `best_contour_approx`
-        if cube_detected_initial and is_shape_acceptable_for_scan: # Use is_shape_acceptable_for_scan to ensure we have a good candidate FOR STABILITY
+        if cube_detected_initial and is_shape_acceptable_for_scan:
             if self.prev_contour_scan is not None:
                 try: 
                     M_curr = cv2.moments(best_contour_approx); M_prev = cv2.moments(self.prev_contour_scan)
@@ -637,22 +542,16 @@ class RubiksCubeGame:
                         c_curr = (int(M_curr["m10"]/M_curr["m00"]), int(M_curr["m01"]/M_curr["m00"]))
                         c_prev = (int(M_prev["m10"]/M_prev["m00"]), int(M_prev["m01"]/M_prev["m00"]))
                         pos_diff = np.sqrt((c_curr[0]-c_prev[0])**2 + (c_curr[1]-c_prev[1])**2)
-                        area_curr = cv2.contourArea(best_contour_approx)
-                        area_prev = cv2.contourArea(self.prev_contour_scan)
-                        area_diff_ratio = abs(area_curr - area_prev) / max(1.0, (area_curr + area_prev) / 2.0)
-
-                        if pos_diff < 10 and area_diff_ratio < 0.20 : # Added area stability
-                             self.stability_counter += 1
+                        if pos_diff < 10: self.stability_counter += 1
                         else: self.stability_counter = 0
                     else: self.stability_counter = 0 
                 except: self.stability_counter = 0 
             else:
                 self.stability_counter = 1 
-            self.prev_contour_scan = best_contour_approx.copy() # Store the raw contour for next frame's stability
+            self.prev_contour_scan = best_contour_approx.copy()
         else: # No acceptable contour or shape rejected
             self.stability_counter = 0
             self.prev_contour_scan = None
-
 
         current_time = time.time()
         time_since_last_scan_attempt = current_time - self.last_scan_time
@@ -664,17 +563,17 @@ class RubiksCubeGame:
 
         if not cube_detected_initial:
             scan_status_text += "Detecting..."
-        elif not is_shape_acceptable_for_scan: # This now considers if forced square was accepted
+        elif not is_shape_acceptable_for_scan:
             scan_status_text += f"Shape rej. {scan_debug_info}"
-            status_color = (0, 165, 255) 
+            status_color = (0, 165, 255) # Orange for warning
         elif time_since_motor < self.MOTOR_STABILIZATION_TIME:
             scan_status_text += f"Motor ({self.MOTOR_STABILIZATION_TIME - time_since_motor:.1f}s)"
         elif time_since_last_scan_attempt < self.SCAN_COOLDOWN:
             scan_status_text += f"Cooldown ({self.SCAN_COOLDOWN - time_since_last_scan_attempt:.1f}s)"
         elif self.stability_counter < self.STABILITY_THRESHOLD:
-            scan_status_text += f"Stabilizing ({self.stability_counter}/{self.STABILITY_THRESHOLD}) {scan_debug_info}"
+            scan_status_text += f"Stabilizing ({self.stability_counter}/{self.STABILITY_THRESHOLD})"
         else: 
-            scan_status_text += f"CAPTURING... {scan_debug_info}"
+            scan_status_text += "CAPTURING..."
             ready_to_capture_this_frame = True
             status_color = (0,255,0) 
         
@@ -682,12 +581,8 @@ class RubiksCubeGame:
         self.status_message = scan_status_text 
 
         if ready_to_capture_this_frame and self.current_scan_idx < 12:
-            if corners_for_transform is None:
-                self.status_message = scan_status_text.replace("CAPTURING...", "No valid corners for warp")
-                # print("Error: corners_for_transform is None during capture logic.") # Debug
-                return display_frame_overlay
-
-            warped_face = self._perspective_transform(frame_to_detect_on, corners_for_transform)
+            # best_contour_approx should be valid here due to prior checks
+            warped_face = self._perspective_transform(frame_to_detect_on, best_contour_approx)
             if warped_face is not None and warped_face.size > 0:
                 grid_s = min(warped_face.shape[0], warped_face.shape[1])
                 cell_s = max(1, grid_s // 3)
@@ -695,7 +590,7 @@ class RubiksCubeGame:
                     self.status_message = scan_status_text.replace("CAPTURING...", "Warped too small")
                     return display_frame_overlay 
                 
-                current_face_sticker_colors: List[str] = [] # Type hint
+                current_face_sticker_colors = []
                 valid_rois = True
                 for r_idx in range(3): 
                     for c_idx in range(3): 
@@ -719,7 +614,7 @@ class RubiksCubeGame:
                 non_center_unknown = False
                 if len(current_face_sticker_colors) == 9:
                     for i, color_char in enumerate(current_face_sticker_colors):
-                        if i == 4: continue # Skip center sticker for this particular check
+                        if i == 4: continue 
                         if color_char == 'X':
                             non_center_unknown = True
                             break
@@ -739,11 +634,13 @@ class RubiksCubeGame:
                         if self.current_scan_idx < 12:
                             next_rotation_cmd = self.rotation_sequence[self.current_scan_idx] 
                             if next_rotation_cmd:
-                                self.status_message = f"Scan {self.current_scan_idx} done. Rotating..." # current_scan_idx already incremented
+                                self.status_message = f"Scan {self.current_scan_idx} done. Rotating..."
                                 self._send_compound_move(next_rotation_cmd) 
                         else: 
-                            self._send_compound_move("F' B")
                             self.status_message = "All scans done. Finalizing..."
+                            # Optional final rotation to a known state if needed for gripper
+                            # self._send_compound_move("B F'") 
+                            
                             constructed_state = self._construct_cube_state_from_scans()
                             if constructed_state:
                                 self._print_cube_state_visual(constructed_state, "Constructed (FRBLUD) for Solving")
@@ -758,6 +655,7 @@ class RubiksCubeGame:
                                     self.send_arduino_command(f"SOLUTION:{self.solution}", is_solution=True)
                                 else: 
                                     self.mode = "idle" 
+                                    # Error message already set by _solve_cube_with_kociemba
                                     self.status_message = self.error_message or "Could not solve. Check scans/colors or cube state."
                                     self._reset_scan_state() 
                             else: 
@@ -816,7 +714,7 @@ class RubiksCubeGame:
             for lower_hsv, upper_hsv in hsv_ranges_list:
                 if not (isinstance(lower_hsv, np.ndarray) and isinstance(upper_hsv, np.ndarray) and
                         lower_hsv.shape == (3,) and upper_hsv.shape == (3,)):
-                    continue # Should not happen if loaded correctly
+                    continue
 
                 mask = cv2.inRange(hsv_sample_area, lower_hsv, upper_hsv)
                 current_color_pixel_count += cv2.countNonZero(mask)
@@ -829,9 +727,7 @@ class RubiksCubeGame:
                 highest_match_strength = match_percentage
                 best_match_color = color_name
         
-        # Lowered threshold for more lenient matching if needed, or adjust specific color ranges.
-        # Original was 0.35. If colors are too similar or lighting varies, this might be an issue.
-        if highest_match_strength < 0.30: # Slightly more permissive
+        if highest_match_strength < 0.35: 
             return 'X'
             
         return best_match_color
@@ -898,11 +794,11 @@ class RubiksCubeGame:
                 h_delta = 30; s_max_cap = 80; v_min_cap = 140 
                 lower_s = max(0, avg_s - s_abs_delta); upper_s = min(s_max_cap, avg_s + s_abs_delta)
                 lower_v = max(v_min_cap, avg_v - v_abs_delta); upper_v = min(255, avg_v + v_abs_delta)
-            elif current_color_to_cal in ["R", "O"]: # Red and Orange might need tighter Hue for Red, careful with wrap-around
-                 h_delta = 7 # Smaller hue delta for R, O
+            elif current_color_to_cal in ["R", "O"]:
+                 h_delta = 7 
                  lower_s = max(s_min_default + 20, avg_s - s_abs_delta); upper_s = min(255, avg_s + s_abs_delta)
                  lower_v = max(v_min_default + 10, avg_v - v_abs_delta); upper_v = min(255, avg_v + v_abs_delta)
-            else: # G, Y, B
+            else: 
                  lower_s = max(s_min_default, avg_s - s_abs_delta); upper_s = min(255, avg_s + s_abs_delta)
                  lower_v = max(v_min_default, avg_v - v_abs_delta); upper_v = min(255, avg_v + v_abs_delta)
 
@@ -913,29 +809,22 @@ class RubiksCubeGame:
 
             final_ranges = []
             if current_color_to_cal == "R": 
-                hue_low_threshold = h_delta + 5 
-                hue_high_threshold = 179 - (h_delta + 5) 
-                
+                hue_low_threshold = h_delta + 5; hue_high_threshold = 179 - (h_delta + 5)
                 if avg_h < hue_low_threshold: 
-                     final_ranges.append((np.array([0, lower_s, lower_v]), 
-                                          np.array([min(179, avg_h + h_delta), upper_s, upper_v])))
-                     final_ranges.append((np.array([max(0, 179 - (h_delta - (avg_h % 180) ) ), lower_s, lower_v]), 
-                                          np.array([179, upper_s, upper_v])))
+                     final_ranges.append((np.array([0, lower_s, lower_v]), np.array([min(179, avg_h + h_delta), upper_s, upper_v])))
+                     final_ranges.append((np.array([max(0, 179 - h_delta), lower_s, lower_v]), np.array([179, upper_s, upper_v])))
                 elif avg_h > hue_high_threshold: 
-                     final_ranges.append((np.array([max(0, avg_h - h_delta), lower_s, lower_v]), 
-                                          np.array([179, upper_s, upper_v])))
-                     final_ranges.append((np.array([0, lower_s, lower_v]), 
-                                          np.array([min(179, (avg_h + h_delta) % 180), upper_s, upper_v])))
+                     final_ranges.append((np.array([max(0, avg_h - h_delta), lower_s, lower_v]), np.array([179, upper_s, upper_v])))
+                     final_ranges.append((np.array([0, lower_s, lower_v]), np.array([min(179, h_delta), upper_s, upper_v])))
                 else: 
-                     final_ranges.append((np.array([max(0,avg_h-h_delta),lower_s,lower_v]), 
-                                          np.array([min(179,avg_h+h_delta),upper_s,upper_v])))
-                final_ranges = [(l,u) for l,u in final_ranges if np.all(l<=u) and l[0]<=u[0] and l[0] < 180 and u[0] < 180 and l[0] != u[0]] # Ensure range is valid
+                     final_ranges.append((np.array([max(0,avg_h-h_delta),lower_s,lower_v]), np.array([min(179,avg_h+h_delta),upper_s,upper_v])))
+                final_ranges = [(l,u) for l,u in final_ranges if np.all(l<=u) and l[0]<=u[0] and l[0] < 180 and u[0] < 180]
             else: 
                 l_h = max(0, avg_h - h_delta); u_h = min(179, avg_h + h_delta)
                 final_ranges.append((np.array([l_h, lower_s, lower_v]), np.array([u_h, upper_s, upper_v])))
 
             if not final_ranges: 
-                print(f"! Warning: No valid ranges generated for {current_color_to_cal}. Using wide fallback based on median HSV.")
+                print(f"! Warning: No valid ranges for {current_color_to_cal}. Using wide fallback.")
                 final_ranges.append((np.array([max(0,avg_h-15),max(0,avg_s-70),max(0,avg_v-80)]), 
                                      np.array([min(179,avg_h+15),min(255,avg_s+70),min(255,avg_v+80)])))
 
@@ -957,8 +846,6 @@ class RubiksCubeGame:
             self.error_message = f"Calib. capture error: {type(e).__name__} - {e}"
             self.status_message = "Calibration capture failed."
             print(f"Error in capture_calibration_color: {self.error_message}")
-            # import traceback # For detailed debugging
-            # traceback.print_exc()
             return False
 
     def _reset_scan_state(self):
@@ -968,7 +855,7 @@ class RubiksCubeGame:
         self.prev_contour_scan = None
         self.stability_counter = 0
         self.last_scan_time = time.time()
-        self.last_motor_move_time = time.time() 
+        self.last_motor_move_time = time.time() # Reset to avoid immediate scan after reset
         print("Scan state has been reset.")
 
     def _reset_solve_state(self):
@@ -987,24 +874,18 @@ class RubiksCubeGame:
         counts = Counter(s)
         if not all(count == 9 for count in counts.values()):
             raise ValueError(f"{name} must have 9 of each URFDLB char. Counts: {counts}")
-        
-        # Kociemba string is URFDLB. Centers are at U(4), R(13), F(22), D(31), L(40), B(49)
-        # in this URFDLB ordered string.
-        centers_kociemba_ordered = [s[4], s[13], s[22], s[31], s[40], s[49]] 
-        if len(set(centers_kociemba_ordered)) != 6:
-            raise ValueError(f"{name} center pieces are not unique: {centers_kociemba_ordered}")
-        
-        # Check if U-face center is 'U', R-face center is 'R', etc.
-        if (centers_kociemba_ordered[0]!='U' or centers_kociemba_ordered[1]!='R' or \
-            centers_kociemba_ordered[2]!='F' or centers_kociemba_ordered[3]!='D' or \
-            centers_kociemba_ordered[4]!='L' or centers_kociemba_ordered[5]!='B'):
-            raise ValueError(f"{name} center pieces are not U,R,F,D,L,B in Kociemba URFDLB face order. Got: {centers_kociemba_ordered}")
+        centers = [s[4], s[13], s[22], s[31], s[40], s[49]] # URFDLB order for centers in Kociemba string
+        if len(set(centers)) != 6:
+            raise ValueError(f"{name} center pieces are not unique: {centers}")
+        if centers[0]!='U' or centers[1]!='R' or centers[2]!='F' or \
+           centers[3]!='D' or centers[4]!='L' or centers[5]!='B':
+            raise ValueError(f"{name} center pieces are not U,R,F,D,L,B in order. Got: {centers}")
     
     def _validate_cube(self, cube_str: str, name: str = "Physical Cube String"):
         if len(cube_str) != 54:
             raise ValueError(f"{name} must be 54 characters, got {len(cube_str)}")
         counts = Counter(cube_str)
-        if 'X' in counts: 
+        if 'X' in counts: # Ensure no unknown 'X' stickers
             raise ValueError(f"{name} contains 'X' (unknown) stickers. Counts: {counts}")
         if len(counts) != 6:
              raise ValueError(f"{name} must have exactly 6 unique colors, found {len(counts)}. Counts: {counts}")
@@ -1013,25 +894,63 @@ class RubiksCubeGame:
 
 
     def _remap_colors_to_kociemba(self, cube_frblud_physical_colors: str):
-        self._validate_cube(cube_frblud_physical_colors, "FRBLUD")
-        centers = [cube_frblud_physical_colors[i] for i in [4, 13, 22, 31, 40, 49]]
-        color_map = {
-            centers[4]: 'U', centers[1]: 'R', centers[0]: 'F',
-            centers[5]: 'D', centers[3]: 'L', centers[2]: 'B'
+        # Input: 54-char string with physical colors (e.g., 'W', 'R', 'G'...), in FRBLUD face order.
+        # F(0-8), R(9-17), B(18-26), L(27-35), U(36-44), D(45-53)
+        
+        # Determine physical color of each of the 6 Kociemba-standard centers (U,R,F,D,L,B)
+        # Kociemba assumes U=White, R=Red, F=Green, D=Yellow, L=Orange, B=Blue (typically)
+        # We need to map our physical colors to these fixed Kociemba letters.
+        # The key is to identify which of our physical colors IS the Kociemba U-face, R-face, etc.
+        
+        # Centers from FRBLUD string (physical colors):
+        center_F_phys = cube_frblud_physical_colors[4]
+        center_R_phys = cube_frblud_physical_colors[13]
+        center_B_phys = cube_frblud_physical_colors[22]
+        center_L_phys = cube_frblud_physical_colors[31]
+        center_U_phys = cube_frblud_physical_colors[40] # Our U-face is at index 40
+        center_D_phys = cube_frblud_physical_colors[49]
+
+        # Create the mapping: physical color -> Kociemba URFDLB letter
+        # This map tells us "if a sticker has physical color X, it should be labeled with Kociemba letter Y"
+        color_map_physical_to_kociemba = {
+            center_U_phys: 'U', # The physical color of our U-face becomes Kociemba 'U'
+            center_R_phys: 'R', # The physical color of our R-face becomes Kociemba 'R'
+            center_F_phys: 'F', # The physical color of our F-face becomes Kociemba 'F'
+            center_D_phys: 'D', # The physical color of our D-face becomes Kociemba 'D'
+            center_L_phys: 'L', # The physical color of our L-face becomes Kociemba 'L'
+            center_B_phys: 'B', # The physical color of our B-face becomes Kociemba 'B'
         }
-        return color_map, ''.join(color_map[c] for c in cube_frblud_physical_colors)
+
+        if len(color_map_physical_to_kociemba) != 6:
+            raise ValueError(f"Center colors are not unique. Physical centers found: "
+                             f"U:{center_U_phys}, R:{center_R_phys}, F:{center_F_phys}, "
+                             f"D:{center_D_phys}, L:{center_L_phys}, B:{center_B_phys}. "
+                             f"Resulting map size: {len(color_map_physical_to_kociemba)}")
+
+        # Apply the mapping to the entire string
+        frblud_string_with_kociemba_chars = "".join([color_map_physical_to_kociemba[c] for c in cube_frblud_physical_colors])
+        
+        return color_map_physical_to_kociemba, frblud_string_with_kociemba_chars
 
 
     def _remap_cube_to_kociemba_face_order(self, cube_frblud_with_kociemba_chars: str):
-        front, right, back, left, up, down = [cube_frblud_with_kociemba_chars[i:i + 9] for i in range(0, 54, 9)]
-        return up + right + front + down + left + back
+        # Input: 54-char string using URFDLB characters, still in FRBLUD physical face order.
+        # F(0-8), R(9-17), B(18-26), L(27-35), U(36-44), D(45-53)
+        # Output: 54-char string in Kociemba's URFDLB face order.
+        _F = cube_frblud_with_kociemba_chars[0:9]
+        _R = cube_frblud_with_kociemba_chars[9:18]
+        _B = cube_frblud_with_kociemba_chars[18:27]
+        _L = cube_frblud_with_kociemba_chars[27:36]
+        _U = cube_frblud_with_kociemba_chars[36:45] # Our U-face string part
+        _D = cube_frblud_with_kociemba_chars[45:54]
+        
+        return _U + _R + _F + _D + _L + _B
 
     def _get_solved_kociemba_string(self):
         return 'U'*9 + 'R'*9 + 'F'*9 + 'D'*9 + 'L'*9 + 'B'*9
 
     def _is_cube_solved_by_kociemba_string(self, kociemba_str: str) -> bool:
         if len(kociemba_str) != 54: return False
-        # Kociemba string is URFDLB. Centers are at U(4), R(13), F(22), D(31), L(40), B(49).
         expected_centers = ['U', 'R', 'F', 'D', 'L', 'B']
         actual_centers = [kociemba_str[4], kociemba_str[13], kociemba_str[22], 
                           kociemba_str[31], kociemba_str[40], kociemba_str[49]]
@@ -1041,22 +960,25 @@ class RubiksCubeGame:
     def _solve_cube_with_kociemba(self, cube_frblud_physical_colors: str):
         try:
             self._validate_cube(cube_frblud_physical_colors, "Input FRBLUD Physical Colors")
-            
+
+            # Remap physical colors to Kociemba URFDLB characters. Output is still FRBLUD face order.
             _, frblud_string_with_kociemba_chars = self._remap_colors_to_kociemba(cube_frblud_physical_colors)
-            
+            # Validate this intermediate string has 9 of each URFDLB char (implicitly checks physical center uniqueness)
             temp_counts = Counter(frblud_string_with_kociemba_chars)
             if not all(count == 9 for count in temp_counts.values()) or len(temp_counts) != 6:
-                 raise ValueError(f"FRBLUD string with Kociemba Chars is invalid (after phys->kociemba char map). Counts: {temp_counts}")
+                 raise ValueError(f"FRBLUD string with Kociemba Chars is invalid. Counts: {temp_counts}")
 
+            # Reorder faces from FRBLUD to Kociemba's URFDLB string order.
             scrambled_kociemba_format_str = self._remap_cube_to_kociemba_face_order(frblud_string_with_kociemba_chars)
+            
             self._validate_kociemba_string(scrambled_kociemba_format_str, "Scrambled Kociemba Format String")
 
             if self._is_cube_solved_by_kociemba_string(scrambled_kociemba_format_str):
                 print("\nCube is already solved! No moves needed.")
                 return "" 
 
-            solution = kociemba.solve(scrambled_kociemba_format_str) # Uses default solved state URFDLB
-
+            solved_kociemba_format_str = self._get_solved_kociemba_string()
+            solution = kociemba.solve(scrambled_kociemba_format_str, solved_kociemba_format_str)
             print(f"Kociemba raw solution: {solution}")
 
             u_replacement = "R L F2 B2 R' L' D R L F2 B2 R' L'"       
@@ -1071,7 +993,8 @@ class RubiksCubeGame:
                 elif move == "U2": expanded_solution_moves.append(u2_replacement)
                 else: expanded_solution_moves.append(move)
             
-            expanded_solution_str = " ".join(m for m in expanded_solution_moves if m)
+            expanded_solution_str = " ".join(m for m in expanded_solution_moves if m) # Ensure no empty strings from replacements
+            
             final_simplified_solution = self._simplify_cube_moves_basic(expanded_solution_str)
 
             print(f"Expanded solution length: {len(expanded_solution_str.split())}")
@@ -1083,15 +1006,15 @@ class RubiksCubeGame:
         except ValueError as ve: 
             self.error_message = f"Kociemba validation/logic error: {str(ve)}"
             print(f"! Error solving cube: {self.error_message}")
-            # import traceback; traceback.print_exc() # For detailed debugging
             return None
-        except Exception as e: 
+        except Exception as e:
             self.error_message = f"Kociemba general error: {type(e).__name__} - {str(e)}"
             print(f"! Error solving cube: {self.error_message}")
-            # import traceback; traceback.print_exc() # For detailed debugging
+            import traceback
+            traceback.print_exc()
             return None
         
-    def _is_cube_solved_by_face_colors(self, cube_state_str: str) -> bool: 
+    def _is_cube_solved_by_face_colors(self, cube_state_str: str) -> bool: # Physical color string
         if len(cube_state_str) != 54: return False
         for i in range(0, 54, 9): 
             face = cube_state_str[i : i+9]
@@ -1103,13 +1026,14 @@ class RubiksCubeGame:
         moves = [m for m in moves_str.strip().split() if m] 
         if not moves: return ""
         
-        simplified_pass1 = [] 
+        simplified_pass1 = [] # First pass: Combine consecutive moves of the SAME face
         i = 0
         while i < len(moves):
             current_move_full = moves[i]
             face = current_move_full[0]
             
-            if face not in ['F', 'B', 'R', 'L', 'D', 'U']: 
+            # This check is crucial: only simplify F,B,R,L,D. Expanded U moves contain these.
+            if face not in ['F', 'B', 'R', 'L', 'D', 'U']: # Added 'U' temporarily if not expanded yet
                 simplified_pass1.append(current_move_full)
                 i += 1
                 continue
@@ -1133,6 +1057,8 @@ class RubiksCubeGame:
             elif net_rot == 3: simplified_pass1.append(face + "'")
             i = j
         
+        # TODO: A second pass could look for cancellations like L R L' R' if needed, but Kociemba is usually good.
+        # For now, this basic simplification is often enough for Arduino commands.
         return " ".join(simplified_pass1)
 
 
@@ -1146,7 +1072,8 @@ class RubiksCubeGame:
             last_face_scrambled = None
             for _ in range(random.randint(18, 22)): 
                 chosen_face = random.choice(possible_faces)
-                # Ensure not to pick the same face consecutively (simple prevention)
+                # Avoid F F, or F F' by ensuring different face than last, or if same axis, ensure it's not immediately inverse.
+                # Simple approach: just don't pick the same face twice in a row.
                 if scramble_moves_list and chosen_face == last_face_scrambled:
                     available_faces = [f for f in possible_faces if f != chosen_face]
                     if not available_faces: continue # Should not happen with 5 faces
@@ -1154,27 +1081,25 @@ class RubiksCubeGame:
                 
                 chosen_modifier = random.choice(modifiers)
                 scramble_moves_list.append(chosen_face + chosen_modifier)
-                last_face_scrambled = chosen_face 
+                last_face_scrambled = chosen_face # Store only the face character
             
             scramble_sequence = " ".join(scramble_moves_list)
-            # Further simplify if moves like R R R appear by chance (unlikely but good practice)
+            # Scramble sequence might benefit from basic simplification too
             scramble_sequence = self._simplify_cube_moves_basic(scramble_sequence)
 
             self.mode = "scrambling"; self.status_message = f"Scrambling: {scramble_sequence[:30]}..."
-            self._reset_solve_state() # Reset any previous solution
-            self.total_solve_moves = len(scramble_sequence.split()) # Display scramble length
+            self._reset_solve_state() 
+            self.total_solve_moves = len(scramble_sequence.split()) 
             print(f"Generated scramble: {scramble_sequence}")
             
-            # Send scramble to Arduino; treat it like a solution for ACK purposes
             if self.send_arduino_command(scramble_sequence, is_solution=True): 
-                # If send_arduino_command sets mode to idle on success for solution, this is fine.
-                if self.mode != "idle": # Check if it was already set to idle by send_arduino_command
+                if self.mode != "idle": # Arduino command might set it to idle on success
                     self.mode = "idle"
                     self.status_message = "Scramble completed."
-                self._reset_solve_state() # Clear scramble progress display
+                self._reset_solve_state() 
                 return True
             else:
-                self.mode = "idle" # Or "error" if send_arduino_command set an error_message
+                self.mode = "idle" 
                 self.error_message = self.error_message or "Failed to execute scramble on Arduino."
                 self.status_message = self.error_message
                 self._reset_solve_state()
@@ -1200,65 +1125,118 @@ class RubiksCubeGame:
         print(self.status_message)
     
     def _construct_cube_state_from_scans(self) -> Optional[str]:
-        cube_state = [''] * 54
-        cube_state[4] = 'B'
-        cube_state[13] = 'O'
-        cube_state[22] = 'G'
-        cube_state[31] = 'R'
-        cube_state[40] = 'W'
-        cube_state[49] = 'Y'
-        cube_state[36:45] = self.u_scans[0]
-        for i in range(54):
-            if not cube_state[i]:
-                cube_state[i] = '-'
-        cube_state[0] = self.u_scans[1][0]
-        cube_state[2] = self.u_scans[1][2]
-        cube_state[3] = self.u_scans[1][3]
-        cube_state[5] = self.u_scans[1][5]
-        cube_state[6] = self.u_scans[1][6]
-        cube_state[8] = self.u_scans[1][8]
-        cube_state[9] = self.u_scans[2][0]
-        cube_state[10] = self.u_scans[2][1]
-        cube_state[11] = self.u_scans[2][2]
-        cube_state[15] = self.u_scans[2][6]
-        cube_state[16] = self.u_scans[2][7]
-        cube_state[17] = self.u_scans[2][8]
-        cube_state[47] = self.u_scans[3][0]
-        cube_state[53] = self.u_scans[3][2]
-        cube_state[1] = self.u_scans[3][3]
-        cube_state[7] = self.u_scans[3][5]
-        cube_state[45] = self.u_scans[3][6]
-        cube_state[51] = self.u_scans[3][8]
-        cube_state[24] = self.u_scans[4][0]
-        cube_state[12] = self.u_scans[4][1]
-        cube_state[18] = self.u_scans[4][2]
-        cube_state[26] = self.u_scans[4][6]
-        cube_state[14] = self.u_scans[4][7]
-        cube_state[20] = self.u_scans[4][8]
-        cube_state[33] = self.u_scans[5][0]
-        cube_state[27] = self.u_scans[5][2]
-        cube_state[50] = self.u_scans[5][3]
-        cube_state[48] = self.u_scans[5][5]
-        cube_state[35] = self.u_scans[5][6]
-        cube_state[29] = self.u_scans[5][8]
-        cube_state[36] = self.u_scans[6][0]
-        cube_state[46] = self.u_scans[6][1]
-        cube_state[38] = self.u_scans[6][2]
-        cube_state[42] = self.u_scans[6][6]
-        cube_state[52] = self.u_scans[6][7]
-        cube_state[44] = self.u_scans[6][8]
-        cube_state[21] = self.u_scans[7][3]
-        cube_state[23] = self.u_scans[7][5]
-        cube_state[34] = self.u_scans[8][1]
-        cube_state[28] = self.u_scans[8][7]
-        cube_state[25] = self.u_scans[9][3]
-        cube_state[19] = self.u_scans[9][5]
-        cube_state[30] = self.u_scans[10][1]
-        cube_state[32] = self.u_scans[10][7]
-        cube_state[39] = self.u_scans[11][3]
-        cube_state[41] = self.u_scans[11][5]
-        return ''.join(cube_state)
+        if len(self.u_scans) != 12 or not all(self.u_scans[i] and len(self.u_scans[i]) == 9 for i in range(12)):
+            self.error_message = "Invalid or incomplete scan data for cube construction."
+            print(f"! CONSTRUCT ERROR: {self.error_message}")
+            for i, scan_face in enumerate(self.u_scans): print(f"  Scan {i+1}: {scan_face if scan_face else 'MISSING'}")
+            return None
+        
+        temp_cube_state = ['X'] * 54 
+        # FRBLUD order for temp_cube_state array
+        
+        # Critical: Define which scan corresponds to which physical face's *primary* view.
+        # This mapping depends entirely on your self.rotation_sequence.
+        # Example: if scan 0 is U, scan 1 is F (after first rotation), etc.
+        # The center u_scans[idx][4] gives the PHYSICAL color of that face's center.
+        
+        # --- START CONFIGURATION SECTION FOR SCAN-TO-FACE MAPPING ---
+        # Modify these indices based on your physical setup and rotation_sequence
+        # Which scan number (0-11) gives the best view of the center of:
+        SCAN_IDX_FOR_U_CENTER = 0
+        SCAN_IDX_FOR_F_CENTER = 1 
+        SCAN_IDX_FOR_R_CENTER = 2
+        SCAN_IDX_FOR_D_CENTER = 3 # Assuming D is obtained by rotating from U/F
+        SCAN_IDX_FOR_B_CENTER = 4 # Assuming B is obtained after further rotations
+        SCAN_IDX_FOR_L_CENTER = 5 # Assuming L is obtained after further rotations
+        # --- END CONFIGURATION SECTION ---
+
+        def get_center_color(scan_idx, default_char_if_bad_scan):
+            if self.u_scans[scan_idx] and len(self.u_scans[scan_idx]) == 9:
+                center = self.u_scans[scan_idx][4]
+                if center == 'X': # If center itself is 'X', that's bad
+                    print(f"Warning: Scan {scan_idx} center is 'X'. Using default '{default_char_if_bad_scan}'.")
+                    return default_char_if_bad_scan
+                return center
+            print(f"Warning: Scan {scan_idx} invalid for center. Using default '{default_char_if_bad_scan}'.")
+            return default_char_if_bad_scan # Fallback if scan data is bad
+
+        actual_color_of_U_face_center = get_center_color(SCAN_IDX_FOR_U_CENTER, 'W')
+        actual_color_of_F_face_center = get_center_color(SCAN_IDX_FOR_F_CENTER, 'G') 
+        actual_color_of_R_face_center = get_center_color(SCAN_IDX_FOR_R_CENTER, 'R')
+        actual_color_of_D_face_center = get_center_color(SCAN_IDX_FOR_D_CENTER, 'Y')
+        actual_color_of_B_face_center = get_center_color(SCAN_IDX_FOR_B_CENTER, 'B')
+        actual_color_of_L_face_center = get_center_color(SCAN_IDX_FOR_L_CENTER, 'O')
+        
+        # Set centers in FRBLUD physical order string
+        temp_cube_state[4]  = actual_color_of_F_face_center 
+        temp_cube_state[13] = actual_color_of_R_face_center 
+        temp_cube_state[22] = actual_color_of_B_face_center 
+        temp_cube_state[31] = actual_color_of_L_face_center 
+        temp_cube_state[40] = actual_color_of_U_face_center 
+        temp_cube_state[49] = actual_color_of_D_face_center 
+
+        # Fill stickers based on the provided complex mapping.
+        # This mapping is highly specific to the scanner's rotation sequence and camera view.
+        # It determines which sticker from which scan (u_scans[scan_idx][sticker_idx]) goes to
+        # which position in the final FRBLUD string.
+        try: 
+            # F face (0-8), center at 4
+            temp_cube_state[0]=self.u_scans[1][0]; temp_cube_state[1]=self.u_scans[3][3]; temp_cube_state[2]=self.u_scans[1][2]
+            temp_cube_state[3]=self.u_scans[1][3];                                       temp_cube_state[5]=self.u_scans[1][5]
+            temp_cube_state[6]=self.u_scans[1][6]; temp_cube_state[7]=self.u_scans[3][5]; temp_cube_state[8]=self.u_scans[1][8]
             
+            # R face (9-17), center at 13
+            temp_cube_state[9]=self.u_scans[2][0]; temp_cube_state[10]=self.u_scans[2][1]; temp_cube_state[11]=self.u_scans[2][2]
+            temp_cube_state[12]=self.u_scans[4][1];                                        temp_cube_state[14]=self.u_scans[4][7]
+            temp_cube_state[15]=self.u_scans[2][6]; temp_cube_state[16]=self.u_scans[2][7]; temp_cube_state[17]=self.u_scans[2][8]
+
+            # B face (18-26), center at 22
+            temp_cube_state[18]=self.u_scans[4][2]; temp_cube_state[19]=self.u_scans[9][5]; temp_cube_state[20]=self.u_scans[4][8]
+            temp_cube_state[21]=self.u_scans[7][3];                                        temp_cube_state[23]=self.u_scans[7][5]
+            temp_cube_state[24]=self.u_scans[4][0]; temp_cube_state[25]=self.u_scans[9][3]; temp_cube_state[26]=self.u_scans[4][6]
+
+            # L face (27-35), center at 31
+            temp_cube_state[27]=self.u_scans[5][2]; temp_cube_state[28]=self.u_scans[8][7]; temp_cube_state[29]=self.u_scans[5][8]
+            temp_cube_state[30]=self.u_scans[10][1];                                       temp_cube_state[32]=self.u_scans[10][7]
+            temp_cube_state[33]=self.u_scans[5][0]; temp_cube_state[34]=self.u_scans[8][1]; temp_cube_state[35]=self.u_scans[5][6]
+            
+            # U face (36-44), center at 40
+            # Fill U face primarily from its main scan (e.g., u_scans[0])
+            for i in range(9): 
+                if i != 4: temp_cube_state[36+i] = self.u_scans[SCAN_IDX_FOR_U_CENTER][i]
+            # Overwrite specific U-face stickers from other scans if they provide better views / different orientations
+            temp_cube_state[36]=self.u_scans[6][0]; temp_cube_state[37]=self.u_scans[0][1]; temp_cube_state[38]=self.u_scans[6][2];
+            temp_cube_state[39]=self.u_scans[11][3];                                       temp_cube_state[41]=self.u_scans[11][5];
+            temp_cube_state[42]=self.u_scans[6][6]; temp_cube_state[43]=self.u_scans[0][7]; temp_cube_state[44]=self.u_scans[6][8];
+            
+            # D face (45-53), center at 49
+            # Fill D face primarily from its main scan (e.g., u_scans[3])
+            for i in range(9):
+                if i != 4: temp_cube_state[45+i] = self.u_scans[SCAN_IDX_FOR_D_CENTER][i]
+            # Overwrite specific D-face stickers
+            temp_cube_state[45]=self.u_scans[3][6]; temp_cube_state[46]=self.u_scans[6][1]; temp_cube_state[47]=self.u_scans[3][0]
+            temp_cube_state[48]=self.u_scans[5][5];                                        temp_cube_state[50]=self.u_scans[5][3]
+            temp_cube_state[51]=self.u_scans[3][8]; temp_cube_state[52]=self.u_scans[6][7]; temp_cube_state[53]=self.u_scans[3][2]
+
+        except IndexError as e:
+            self.error_message = f"IndexError in cube construction: {e}. A scan might be missing or malformed."
+            print(f"! CONSTRUCT ERROR: {self.error_message}")
+            for i_scan, scan_data in enumerate(self.u_scans): print(f"  Scan {i_scan}: {scan_data}")
+            return None
+        
+        final_cube_state_str = "".join(temp_cube_state)
+        
+        try:
+            self._validate_cube(final_cube_state_str, "Constructed FRBLUD String")
+        except ValueError as ve:
+            self.error_message = f"Constructed state invalid: {ve}. Final string: {final_cube_state_str}"
+            print(f"! CONSTRUCT ERROR: {self.error_message}")
+            self._print_cube_state_visual(final_cube_state_str, "Failed FRBLUD Construction")
+            return None
+            
+        # self._print_cube_state_visual(final_cube_state_str, "Successfully Constructed FRBLUD")
+        return final_cube_state_str
+
     def _print_cube_state_visual(self, state_str_frblud: str, title: str = "Cube State (FRBLUD)"):
         if len(state_str_frblud) != 54:
             print(f"Error printing cube state: Expected 54 chars, got {len(state_str_frblud)}")
@@ -1269,76 +1247,73 @@ class RubiksCubeGame:
 
         print(f"\n--- {title} ---")
         def print_face_row(face_str, row_idx, prefix="   "): print(f"{prefix}{face_str[row_idx*3]} {face_str[row_idx*3+1]} {face_str[row_idx*3+2]}")
-        # Print U face
         for r_idx in range(3): print_face_row(U, r_idx, "      ") 
         print("      ---------")
-        # Print L, F, R, B faces in a row
         for r_idx in range(3): 
             l_s = f"{L[r_idx*3]} {L[r_idx*3+1]} {L[r_idx*3+2]}"
             f_s = f"{F[r_idx*3]} {F[r_idx*3+1]} {F[r_idx*3+2]}"
             r_s = f"{R[r_idx*3]} {R[r_idx*3+1]} {R[r_idx*3+2]}"
             b_s = f"{B[r_idx*3]} {B[r_idx*3+1]} {B[r_idx*3+2]}"
-            print(f"{l_s:<5} | {f_s:<5} | {r_s:<5} | {b_s:<5}")
+            print(f"{l_s} | {f_s} | {r_s} | {b_s}")
         print("      ---------")
-        # Print D face
         for r_idx in range(3): print_face_row(D, r_idx, "      ") 
         print("--- End of Cube State ---\n")
 
-# Example usage (retains original example structure)
+# Example usage
 if __name__ == '__main__':
     game = RubiksCubeGame()
     print("RubiksCubeGame instance created.")
     
+    # Test starting modes
     game.start_calibration_mode()
     print(f"Mode after starting calibration: {game.mode}, Step: {game.calibration_step}")
-    # Assuming calibration mode would be exited or completed before scanning in a real scenario.
-    # For this test, directly start scanning to see its reset behavior.
-    game.mode = "idle" # Simulate exiting calibration
-    game.start_scanning_mode() 
+    game.start_scanning_mode()
     print(f"Mode after starting scan: {game.mode}, Scan Index: {game.current_scan_idx}")
 
-    # Test Kociemba logic with a physically solved cube string (using assumed standard center colors)
+    # Test Kociemba logic with a known solved state (should return empty solution)
+    # Standard solved state in FRBLUD physical colors (example: W=U, R=R, G=F, Y=D, O=L, B=B)
     # F=Green, R=Red, B=Blue, L=Orange, U=White, D=Yellow
     solved_frblud_physical = ("G"*9) + ("R"*9) + ("B"*9) + ("O"*9) + ("W"*9) + ("Y"*9)
     print(f"\nTesting solve with physically solved FRBLUD: {solved_frblud_physical[:10]}...")
     solution = game._solve_cube_with_kociemba(solved_frblud_physical)
-    print(f"Solution for solved cube: '{solution}' (Expected empty string or similar indication)")
+    print(f"Solution for solved cube: '{solution}' (Expected empty string)")
     if game.error_message: print(f"Error during test solve: {game.error_message}")
-    game.error_message = None # Reset error for next test
+    game.error_message = None # Clear error for next test
+
+    # Test with a simple scramble (e.g., one F move)
+    # F face is Green. If we do an F move, Green stickers move.
+    # F GGG GGG GGG -> GGG GGG GGG (no change on F face stickers themselves, only their positions relative to other faces)
+    # This needs a more complex example to be meaningful for _solve_cube_with_kociemba input.
+    
+    # Let's use a known scramble string for Kociemba and see if it can be processed
+    # This is a Kociemba format string (URFDLB order)
+    # String from: https://github.com/hkociemba/Cubie représenter
+    # DRULFUULDBFRVBRDLFURFLVDDRVBDLUFFFBLURDBLBDLFFRBUVD
+    # This is not directly usable as input to _solve_cube_with_kociemba
+    # which expects physical colors in FRBLUD order.
+
+    # A better test for _solve_cube_with_kociemba:
+    # 1. Define physical centers: U=W, R=R, F=G, D=Y, L=O, B=B
+    # 2. Create a known scrambled Kociemba string (URFDLB chars, URFDLB order)
+    #    e.g., from a Kociemba solver output for a scramble.
+    #    Example: F move on a solved cube: UUUUUUUUURRRRRRRRR FFFFFFFFF DDDDDDDDD LLLLLLLLL BBBBBBBBB
+    #    Kociemba input for "F": UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB (no, this is solved)
+    #    If solved is UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB
+    #    An F move changes edges and corners between U,R,D,L and F.
+    #    This is complex to construct manually.
+    #
+    #    Let's try a string that IS scrambled in Kociemba URFDLB format:
+    kociemba_scrambled_urfldb_chars = "DUUBULDBFRBFRRULLLBRDFFFBLURDBFDFDRFRULBLUFDURRBLDDR" # Example only
+    
+    # To test _solve_cube_with_kociemba, we need the *physical color* string in FRBLUD order.
+    # This requires reversing the mapping. This is too complex for a simple __main__ test.
+    # The current tests for simplify_moves are more direct.
 
     print("\n--- Simplify Moves Tests ---")
-    test_moves_simple = "F B' R R R L2 L2 D' D D D F2" 
+    test_moves_simple = "F B' R R R L2 L2 D' D D D F2"
     simplified = game._simplify_cube_moves_basic(test_moves_simple)
     print(f"Original: '{test_moves_simple}' -> Simplified: '{simplified}' (Expected: F B' R' D2 F2)")
 
-    test_moves_cancel = "F F' R R2 B B B" 
+    test_moves_cancel = "F F' R R2 B B B"
     simplified_cancel = game._simplify_cube_moves_basic(test_moves_cancel)
     print(f"Original: '{test_moves_cancel}' -> Simplified: '{simplified_cancel}' (Expected: R' B')")
-
-    print("\n--- Auto-Squaring Test ---")
-    mock_corners_slightly_off = np.array([
-        [50, 50], [155, 55], [150, 160], [45, 155] 
-    ], dtype=np.float32)
-    
-    forced_sq = game._force_ideal_square_from_detected_corners(mock_corners_slightly_off)
-    if forced_sq is not None:
-        print(f"Mock corners (slightly off): \n{mock_corners_slightly_off}")
-        print(f"Forced ideal square: \n{forced_sq}")
-        fx, fy, fw, fh = cv2.boundingRect(forced_sq.astype(np.int32))
-        print(f"Forced square BRect: x={fx}, y={fy}, w={fw}, h={fh}, AR={fw/fh if fh > 0 else 0:.2f}")
-    else:
-        print("Forcing square failed for mock_corners_slightly_off (or deemed too small/large).")
-
-    mock_corners_too_small = np.array([
-        [100,100], [110,100], [110,110], [100,110]
-    ], dtype=np.float32)
-    # Ensure MIN_CONTOUR_AREA would make this "too small" for testing.
-    # game.MIN_CONTOUR_AREA = 20*20 # Example: an area of 400. 10x10 square has area 100.
-    # The heuristic in _force_ideal_square_from_detected_corners also uses sqrt(MIN_CONTOUR_AREA)*0.5
-    # so if MIN_CONTOUR_AREA is 2000 (default base), sqrt is ~44.7, *0.5 is ~22.3.
-    # Our 10x10 mock_corners_too_small (ideal_side=10) should be rejected.
-    forced_sq_small = game._force_ideal_square_from_detected_corners(mock_corners_too_small)
-    if forced_sq_small is None:
-        print("Forcing square correctly rejected for too_small corners.")
-    else:
-        print(f"Forcing square INCORRECTLY PRODUCED for too_small corners: \n{forced_sq_small}")

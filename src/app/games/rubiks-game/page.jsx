@@ -4,13 +4,13 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 
 // Helper constant
 const COLOR_NAMES = ["W", "R", "G", "Y", "O", "B"];
-const MIN_FRAME_INTERVAL = 100; // ms, roughly 10 FPS. Adjust as needed.
-const JPEG_QUALITY = 0.75; // 0.0 to 1.0
+// REMOVED: MIN_FRAME_INTERVAL, JPEG_QUALITY, PREVIEW_WIDTH, PREVIEW_HEIGHT
+// These are now part of 'appliedCameraSettings' state
 
 export default function RubiksSolverPage() {
     const gameId = "rubiks";
     const videoRef = useRef(null);
-    const canvasRef = useRef(null); 
+    const canvasRef = useRef(null);
     const wsRef = useRef(null);
     const ipCamImgRef = useRef(null);
 
@@ -18,16 +18,32 @@ export default function RubiksSolverPage() {
     const [status, setStatus] = useState("Idle");
     const [processedFrame, setProcessedFrame] = useState(null);
     const [showSettings, setShowSettings] = useState(false);
-    
-    const [serialPort, setSerialPort] = useState("COM7"); 
+
+    const [serialPort, setSerialPort] = useState("COM7");
     const [cameraSettings, setCameraSettings] = useState({
-        useIpCamera: true, // Let's default to true if that's your primary use case
+        useIpCamera: true,
         ipCameraAddress: "http://192.168.1.9:8080/video",
+        frameRate: 10,      // Default FPS
+        jpegQuality: 0.75,  // Default JPEG quality
+        previewWidth: 320,  // Default preview width
+        previewHeight: 240, // Default preview height
     });
     const [appliedCameraSettings, setAppliedCameraSettings] = useState({
         useIpCamera: true,
         ipCameraAddress: "http://192.168.1.9:8080/video",
+        frameRate: 10,
+        jpegQuality: 0.75,
+        previewWidth: 320,
+        previewHeight: 240,
     });
+
+    const [cameraAdjustments, setCameraAdjustments] = useState({
+        zoom: 1,
+        crop: { x: 0, y: 0, width: 1, height: 1 },
+    });
+    const cameraAdjustmentsRef = useRef(cameraAdjustments);
+
+    const [cropOverlayStyle, setCropOverlayStyle] = useState({});
 
     const [gameState, setGameState] = useState({
         mode: "idle",
@@ -42,16 +58,19 @@ export default function RubiksSolverPage() {
         solution_preview: null,
     });
     const [gameStarted, setGameStarted] = useState(false);
-    const [isCameraLoading, setIsCameraLoading] = useState(false); // For local preview loading
-    
-    const frameSenderHandle = useRef(null); 
+    const [isCameraLoading, setIsCameraLoading] = useState(false);
+
+    const frameSenderHandle = useRef(null);
     const lastFrameSentTime = useRef(0);
 
     useEffect(() => {
         setIsClient(true);
     }, []);
 
-    // Effect for WebSocket connection and local camera
+    useEffect(() => {
+        cameraAdjustmentsRef.current = cameraAdjustments;
+    }, [cameraAdjustments]);
+
     useEffect(() => {
         if (!isClient || !gameStarted) {
             if (wsRef.current) {
@@ -66,37 +85,49 @@ export default function RubiksSolverPage() {
                 videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
                 videoRef.current.srcObject = null;
             }
-            // Set status when game stops
+            if (ipCamImgRef.current) { // Ensure IP cam src is cleared if game stops
+                ipCamImgRef.current.src = "";
+            }
             if (gameStarted === false && status !== "Idle" && !status.includes("Error") && !status.includes("Disconnected")) {
                 setStatus("Disconnected (Game Stopped)");
             }
             return;
         }
 
-        // --- Setup Local Camera Preview ---
-        setIsCameraLoading(true); // Set loading true when starting camera setup
+        setIsCameraLoading(true);
         let localStream = null;
+
+        // Use appliedCameraSettings for current session values
+        const currentPreviewWidth = appliedCameraSettings.previewWidth;
+        const currentPreviewHeight = appliedCameraSettings.previewHeight;
+        const currentMinFrameInterval = 1000 / appliedCameraSettings.frameRate;
+        const currentJpegQuality = appliedCameraSettings.jpegQuality;
+
         const setupLocalCamera = async () => {
-            // Stop any existing stream
             if (videoRef.current && videoRef.current.srcObject) {
                 videoRef.current.srcObject.getTracks().forEach((t) => t.stop());
                 videoRef.current.srcObject = null;
             }
-            // Clear IP cam src if switching to local
-            if (ipCamImgRef.current && !appliedCameraSettings.useIpCamera) {
-                 ipCamImgRef.current.src = ""; 
-            }
-
+             if (ipCamImgRef.current && !appliedCameraSettings.useIpCamera) {
+                 ipCamImgRef.current.src = "";
+             }
 
             if (appliedCameraSettings.useIpCamera) {
                 console.log("Attempting to use IP Camera:", appliedCameraSettings.ipCameraAddress);
-                // For IP Camera, loading is handled by img onload/onerror
-                // The img tag with key={appliedCameraSettings.ipCameraAddress} handles src update
-                // setIsCameraLoading will be set to false by onLoad/onError of the img tag
-            } else { // Local webcam
+                if (!appliedCameraSettings.ipCameraAddress) {
+                    setGameState(prev => ({ ...prev, error_message: "IP Camera address is not set." }));
+                    setIsCameraLoading(false);
+                }
+                // For IP Cam, loading state is managed by img onLoad/onError
+            } else {
                 console.log("Attempting to use local webcam.");
                 try {
-                    localStream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+                    localStream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { 
+                            width: { ideal: currentPreviewWidth }, 
+                            height: { ideal: currentPreviewHeight } 
+                        } 
+                    });
                     if (videoRef.current) {
                         videoRef.current.srcObject = localStream;
                         videoRef.current.onloadedmetadata = () => {
@@ -118,7 +149,6 @@ export default function RubiksSolverPage() {
         };
         setupLocalCamera();
 
-        // --- Setup WebSocket ---
         const ws = new WebSocket(`ws://localhost:8000/ws/${gameId}`);
         wsRef.current = ws;
         setStatus("Connecting to WebSocket...");
@@ -129,13 +159,13 @@ export default function RubiksSolverPage() {
             const initialConfig = {
                 serial_port: serialPort,
                 serial_baudrate: 9600,
-                video_source: appliedCameraSettings.useIpCamera ? appliedCameraSettings.ipCameraAddress : "0" 
+                video_source: appliedCameraSettings.useIpCamera ? appliedCameraSettings.ipCameraAddress : "0"
             };
             ws.send(JSON.stringify(initialConfig));
-            
-            lastFrameSentTime.current = 0; 
-            if (frameSenderHandle.current) cancelAnimationFrame(frameSenderHandle.current); 
-            
+
+            lastFrameSentTime.current = 0;
+            if (frameSenderHandle.current) cancelAnimationFrame(frameSenderHandle.current);
+
             const sendFrame = () => {
                 if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !gameStarted) {
                     if(frameSenderHandle.current) cancelAnimationFrame(frameSenderHandle.current);
@@ -144,7 +174,7 @@ export default function RubiksSolverPage() {
                 }
 
                 const now = Date.now();
-                if (now - lastFrameSentTime.current < MIN_FRAME_INTERVAL) {
+                if (now - lastFrameSentTime.current < currentMinFrameInterval) {
                     frameSenderHandle.current = requestAnimationFrame(sendFrame);
                     return;
                 }
@@ -153,39 +183,45 @@ export default function RubiksSolverPage() {
                 const canvas = canvasRef.current;
                 let sourceElement = appliedCameraSettings.useIpCamera ? ipCamImgRef.current : videoRef.current;
                 
-                if (sourceElement && canvas &&
-                    ( (sourceElement.tagName === "VIDEO" && sourceElement.readyState >= 2 /* HAVE_CURRENT_DATA or more */) ||
-                      (sourceElement.tagName === "IMG" && sourceElement.complete && sourceElement.naturalWidth > 0 && sourceElement.naturalHeight > 0) ) // Check naturalWidth/Height for img
-                   ) {
-                    
-                    // Ensure canvas dimensions match the source element if it's a video or loaded image
-                    const sWidth = sourceElement.videoWidth || sourceElement.naturalWidth;
-                    const sHeight = sourceElement.videoHeight || sourceElement.naturalHeight;
+                const currentAdjustments = cameraAdjustmentsRef.current;
 
-                    if (sWidth && sHeight) { // Only draw if dimensions are valid
-                        canvas.width = sWidth;
-                        canvas.height = sHeight;
+                if (sourceElement && canvas &&
+                    ( (sourceElement.tagName === "VIDEO" && sourceElement.readyState >= 2) ||
+                      (sourceElement.tagName === "IMG" && sourceElement.complete && sourceElement.naturalWidth > 0 && sourceElement.naturalHeight > 0) )
+                   ) {
+
+                    const sWidthOrig = sourceElement.videoWidth || sourceElement.naturalWidth;
+                    const sHeightOrig = sourceElement.videoHeight || sourceElement.naturalHeight;
+
+                    if (sWidthOrig && sHeightOrig) {
+                        let cropX_abs = currentAdjustments.crop.x * sWidthOrig;
+                        let cropY_abs = currentAdjustments.crop.y * sHeightOrig;
+                        let cropW_abs = currentAdjustments.crop.width * sWidthOrig;
+                        let cropH_abs = currentAdjustments.crop.height * sHeightOrig;
+
+                        let zoomedSWidth = cropW_abs / currentAdjustments.zoom;
+                        let zoomedSHeight = cropH_abs / currentAdjustments.zoom;
+                        let zoomedSx = cropX_abs + (cropW_abs - zoomedSWidth) / 2;
+                        let zoomedSy = cropY_abs + (cropH_abs - zoomedSHeight) / 2;
+                        
+                        canvas.width = currentPreviewWidth;
+                        canvas.height = currentPreviewHeight;
                         const ctx = canvas.getContext("2d", { alpha: false });
                         try {
-                            ctx.drawImage(sourceElement, 0, 0, canvas.width, canvas.height);
+                            ctx.drawImage(sourceElement, zoomedSx, zoomedSy, zoomedSWidth, zoomedSHeight, 0, 0, canvas.width, canvas.height);
                             canvas.toBlob(
                                 (blob) => {
                                     if (blob && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                                        // console.log("Sending frame blob of size:", blob.size); 
-                                        wsRef.current.send(blob); 
+                                        wsRef.current.send(blob);
                                     }
                                 },
                                 "image/jpeg",
-                                JPEG_QUALITY
+                                currentJpegQuality
                             );
                         } catch (e) {
                             console.error("Error drawing source to canvas or sending frame:", e);
                         }
-                    } else {
-                        // console.warn("Source element dimensions not ready for drawing.");
                     }
-                } else {
-                    // console.warn("Source element or canvas not ready for sendFrame.");
                 }
                 frameSenderHandle.current = requestAnimationFrame(sendFrame);
             };
@@ -195,7 +231,6 @@ export default function RubiksSolverPage() {
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                // console.log("Received from backend:", data); 
                 setGameState(prev => ({
                     ...prev,
                     mode: data.mode !== undefined ? data.mode : prev.mode,
@@ -204,19 +239,13 @@ export default function RubiksSolverPage() {
                     solve_move_index: data.solve_move_index !== undefined ? data.solve_move_index : prev.solve_move_index,
                     total_solve_moves: data.total_solve_moves !== undefined ? data.total_solve_moves : prev.total_solve_moves,
                     status_message: data.status_message !== undefined ? data.status_message : prev.status_message,
-                    error_message: data.error_message !== undefined ? data.error_message : null, // Clear if not present
+                    error_message: data.error_message !== undefined ? data.error_message : null,
                     serial_connected: data.serial_connected !== undefined ? data.serial_connected : false,
                     current_color_calibrating: data.current_color_calibrating !== undefined ? data.current_color_calibrating : prev.current_color_calibrating,
                     solution_preview: data.solution_preview !== undefined ? data.solution_preview : prev.solution_preview,
                 }));
                 if (data.processed_frame) {
                     setProcessedFrame(`data:image/jpeg;base64,${data.processed_frame}`);
-                } else if (data.processed_frame === null && gameState.mode !== "error") { 
-                     // If backend explicitly sends null for frame (e.g. after command), 
-                     // don't clear it if we were already showing an error frame.
-                     // This logic might need refinement based on how you want to handle "no frame" vs "error frame".
-                     // For now, if backend sends null and we are not in error mode, we can clear.
-                     // setProcessedFrame(null); // Or keep the last good frame.
                 }
             } catch (e) {
                 console.error("Error parsing message from backend:", e, event.data);
@@ -224,7 +253,7 @@ export default function RubiksSolverPage() {
             }
         };
 
-        ws.onclose = (event) => { 
+        ws.onclose = (event) => {
             setStatus(`WebSocket Closed (Code: ${event.code})`);
             console.log(`WebSocket closed: Code ${event.code}, Reason: ${event.reason}`);
             if (frameSenderHandle.current) {
@@ -232,8 +261,8 @@ export default function RubiksSolverPage() {
                 frameSenderHandle.current = null;
             }
         };
-        ws.onerror = (err_event) => { 
-            setStatus("WebSocket Error"); 
+        ws.onerror = (err_event) => {
+            setStatus("WebSocket Error");
             console.error("WebSocket Error Event:", err_event);
             if (frameSenderHandle.current) {
                 cancelAnimationFrame(frameSenderHandle.current);
@@ -241,7 +270,7 @@ export default function RubiksSolverPage() {
             }
         };
 
-        return () => { 
+        return () => {
             console.log("Cleaning up RubiksPage useEffect dependencies.");
             if (frameSenderHandle.current) {
                 cancelAnimationFrame(frameSenderHandle.current);
@@ -249,30 +278,114 @@ export default function RubiksSolverPage() {
             }
             if (wsRef.current) {
                 console.log("Closing WebSocket connection from cleanup.");
-                wsRef.current.onopen = null; // Remove handlers before closing
-                wsRef.current.onmessage = null;
-                wsRef.current.onerror = null;
-                wsRef.current.onclose = null;
+                wsRef.current.onopen = null; wsRef.current.onmessage = null;
+                wsRef.current.onerror = null; wsRef.current.onclose = null;
                 wsRef.current.close();
                 wsRef.current = null;
             }
             if (localStream) {
                 localStream.getTracks().forEach((t) => t.stop());
             }
-             if (videoRef.current && videoRef.current.srcObject) { 
+             if (videoRef.current && videoRef.current.srcObject) {
                 videoRef.current.srcObject.getTracks().forEach(t => t.stop());
                 videoRef.current.srcObject = null;
             }
+            // Clear IP Cam image if it was active
+            if (ipCamImgRef.current) {
+                ipCamImgRef.current.src = "";
+            }
         };
-    // Make sure serialPort and appliedCameraSettings are stable or memoized if they cause re-runs too often
-    }, [isClient, gameStarted, appliedCameraSettings.useIpCamera, appliedCameraSettings.ipCameraAddress, serialPort]);
+    }, [
+        isClient, 
+        gameStarted, 
+        appliedCameraSettings.useIpCamera, 
+        appliedCameraSettings.ipCameraAddress, 
+        appliedCameraSettings.frameRate,
+        appliedCameraSettings.jpegQuality,
+        appliedCameraSettings.previewWidth,
+        appliedCameraSettings.previewHeight,
+        serialPort
+    ]);
 
-
-    if (!isClient) return <div className="flex justify-center items-center min-h-screen"><p className="text-xl">Loading Client...</p></div>;
+    useEffect(() => {
+        if (!gameStarted && !isCameraLoading) {
+            setCropOverlayStyle({ display: 'none' });
+            return;
+        }
+        
+        const sourceElement = appliedCameraSettings.useIpCamera ? ipCamImgRef.current : videoRef.current;
+        if (!sourceElement || isCameraLoading || 
+            !((sourceElement.tagName === "VIDEO" && sourceElement.videoWidth > 0) || 
+              (sourceElement.tagName === "IMG" && sourceElement.naturalWidth > 0))) {
+            setCropOverlayStyle({ display: 'none' });
+            return;
+        }
+    
+        const videoWidth = sourceElement.videoWidth || sourceElement.naturalWidth;
+        const videoHeight = sourceElement.videoHeight || sourceElement.naturalHeight;
+    
+        if (!videoWidth || !videoHeight) {
+            setCropOverlayStyle({ display: 'none' });
+            return;
+        }
+    
+        let cropX_abs = cameraAdjustments.crop.x * videoWidth;
+        let cropY_abs = cameraAdjustments.crop.y * videoHeight;
+        let cropW_abs = cameraAdjustments.crop.width * videoWidth;
+        let cropH_abs = cameraAdjustments.crop.height * videoHeight;
+    
+        let finalSx_orig = cropX_abs + (cropW_abs - cropW_abs / cameraAdjustments.zoom) / 2;
+        let finalSy_orig = cropY_abs + (cropH_abs - cropH_abs / cameraAdjustments.zoom) / 2;
+        let finalSWidth_orig = cropW_abs / cameraAdjustments.zoom;
+        let finalSHeight_orig = cropH_abs / cameraAdjustments.zoom;
+        
+        const sourceAspectRatio = videoWidth / videoHeight;
+        const previewBoxAspectRatio = appliedCameraSettings.previewWidth / appliedCameraSettings.previewHeight;
+        let renderedW, renderedH, offsetX_in_box, offsetY_in_box;
+    
+        if (sourceAspectRatio > previewBoxAspectRatio) { 
+            renderedW = appliedCameraSettings.previewWidth;
+            renderedH = appliedCameraSettings.previewWidth / sourceAspectRatio;
+            offsetX_in_box = 0;
+            offsetY_in_box = (appliedCameraSettings.previewHeight - renderedH) / 2;
+        } else { 
+            renderedH = appliedCameraSettings.previewHeight;
+            renderedW = appliedCameraSettings.previewHeight * sourceAspectRatio;
+            offsetY_in_box = 0;
+            offsetX_in_box = (appliedCameraSettings.previewWidth - renderedW) / 2;
+        }
+    
+        const scaleToRendered = renderedW / videoWidth; 
+    
+        const overlayX_on_rendered = finalSx_orig * scaleToRendered;
+        const overlayY_on_rendered = finalSy_orig * scaleToRendered;
+        const overlayW_on_rendered = finalSWidth_orig * scaleToRendered;
+        const overlayH_on_rendered = finalSHeight_orig * scaleToRendered;
+    
+        setCropOverlayStyle({
+            position: 'absolute',
+            left: `${offsetX_in_box + overlayX_on_rendered}px`,
+            top: `${offsetY_in_box + overlayY_on_rendered}px`,
+            width: `${overlayW_on_rendered}px`,
+            height: `${overlayH_on_rendered}px`,
+            border: '2px dashed rgba(255, 0, 0, 0.7)',
+            boxSizing: 'border-box',
+            display: 'block',
+            pointerEvents: 'none',
+        });
+    
+    }, [
+        cameraAdjustments, 
+        appliedCameraSettings.useIpCamera, 
+        appliedCameraSettings.ipCameraAddress, 
+        appliedCameraSettings.previewWidth,
+        appliedCameraSettings.previewHeight,
+        isCameraLoading, 
+        gameStarted
+    ]);
 
     const handleSendCommand = (commandPayload) => {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            // console.log("Sending command:", commandPayload);
             wsRef.current.send(JSON.stringify(commandPayload));
         } else {
             setGameState(prev => ({ ...prev, error_message: "WebSocket not connected. Cannot send command."}));
@@ -280,29 +393,93 @@ export default function RubiksSolverPage() {
         }
     };
     
+    const handleCropChange = useCallback((key, rawValue) => {
+        setCameraAdjustments(prev => {
+            const newAdj = { ...prev };
+            let newCrop = { ...newAdj.crop };
+            let value = parseFloat(rawValue);
+    
+            if (isNaN(value)) value = (key === 'width' || key === 'height') ? 0.1 : 0;
+
+            if (key === 'x') {
+                value = Math.max(0, Math.min(value, 1 - newCrop.width)); 
+                newCrop.x = value;
+            } else if (key === 'y') {
+                value = Math.max(0, Math.min(value, 1 - newCrop.height));
+                newCrop.y = value;
+            } else if (key === 'width') {
+                value = Math.max(0.1, Math.min(value, 1 - newCrop.x));
+                newCrop.width = value;
+            } else if (key === 'height') {
+                value = Math.max(0.1, Math.min(value, 1 - newCrop.y));
+                newCrop.height = value;
+            }
+            newAdj.crop = newCrop;
+            return newAdj;
+        });
+    }, []);
+
+    if (!isClient) return <div className="flex justify-center items-center min-h-screen"><p className="text-xl">Loading Client...</p></div>;
+    
     const SettingsModal = () =>
         showSettings && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60 p-4">
-                <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md relative">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60 p-4 overflow-y-auto">
+                <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg relative">
                     <button onClick={() => setShowSettings(false)} className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 text-2xl font-bold">×</button>
                     <h3 className="text-xl font-semibold text-gray-800 mb-5">Settings</h3>
+                    
                     <div className="mb-4">
                         <label htmlFor="serialPort" className="block mb-1.5 text-sm font-medium text-gray-700">Arduino Serial Port:</label>
                         <input type="text" id="serialPort" value={serialPort} onChange={(e) => setSerialPort(e.target.value)} placeholder="e.g., COM7 or /dev/ttyUSB0" className="w-full p-2.5 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"/>
                     </div>
-                    <div className="flex items-center mb-4">
-                        <input type="checkbox" id="useIpCamera" checked={cameraSettings.useIpCamera} onChange={(e) => setCameraSettings({ ...cameraSettings, useIpCamera: e.target.checked, ipCameraAddress: cameraSettings.useIpCamera ? "" : appliedCameraSettings.ipCameraAddress || "http://192.168.1.9:8080/video"})} className="mr-2 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"/>
-                        <label htmlFor="useIpCamera" className="text-sm font-medium text-gray-700">Use IP Camera</label>
-                    </div>
-                    {cameraSettings.useIpCamera && (
-                        <div className="mb-5">
-                            <label htmlFor="ipCameraAddress" className="block mb-1.5 text-sm font-medium text-gray-700">IP Camera URL:</label>
-                            <input type="text" id="ipCameraAddress" value={cameraSettings.ipCameraAddress} onChange={(e) => setCameraSettings({ ...cameraSettings, ipCameraAddress: e.target.value })} placeholder="http://camera-ip:port/video" className="w-full p-2.5 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"/>
+
+                    <div className="border-t pt-4 mt-4 mb-4">
+                        <p className="text-md font-medium text-gray-700 mb-2">Camera Source</p>
+                        <div className="flex items-center mb-3">
+                            <input type="checkbox" id="useIpCamera" checked={cameraSettings.useIpCamera} onChange={(e) => setCameraSettings(prev => ({ ...prev, useIpCamera: e.target.checked, ipCameraAddress: !e.target.checked ? "" : (prev.ipCameraAddress || "http://192.168.1.9:8080/video")}))} className="mr-2 h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"/>
+                            <label htmlFor="useIpCamera" className="text-sm font-medium text-gray-700">Use IP Camera</label>
                         </div>
-                    )}
+                        {cameraSettings.useIpCamera && (
+                            <div className="mb-3">
+                                <label htmlFor="ipCameraAddress" className="block mb-1.5 text-sm font-medium text-gray-700">IP Camera URL:</label>
+                                <input type="text" id="ipCameraAddress" value={cameraSettings.ipCameraAddress} onChange={(e) => setCameraSettings(prev => ({ ...prev, ipCameraAddress: e.target.value }))} autoFocus placeholder="http://camera-ip:port/video" className="w-full p-2.5 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"/>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="border-t pt-4 mt-4 mb-5">
+                         <p className="text-md font-medium text-gray-700 mb-3">Frame & Quality Settings</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label htmlFor="frameRate" className="block mb-1.5 text-sm font-medium text-gray-700">Frame Rate (FPS): {cameraSettings.frameRate}</label>
+                                <input type="range" id="frameRate" min="1" max="30" step="1" value={cameraSettings.frameRate} onChange={(e) => setCameraSettings(prev => ({ ...prev, frameRate: parseInt(e.target.value, 10) }))} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-500"/>
+                            </div>
+                            <div>
+                                <label htmlFor="jpegQuality" className="block mb-1.5 text-sm font-medium text-gray-700">JPEG Quality: {Number(cameraSettings.jpegQuality).toFixed(2)}</label>
+                                <input type="range" id="jpegQuality" min="0.1" max="1.0" step="0.05" value={cameraSettings.jpegQuality} onChange={(e) => setCameraSettings(prev => ({ ...prev, jpegQuality: parseFloat(e.target.value) }))} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-500"/>
+                            </div>
+                            <div>
+                                <label htmlFor="previewWidth" className="block mb-1.5 text-sm font-medium text-gray-700">Preview Width (px):</label>
+                                <input type="number" id="previewWidth" value={cameraSettings.previewWidth} onChange={(e) => setCameraSettings(prev => ({ ...prev, previewWidth: parseInt(e.target.value, 10) || prev.previewWidth }))} className="w-full p-2.5 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"/>
+                            </div>
+                            <div>
+                                <label htmlFor="previewHeight" className="block mb-1.5 text-sm font-medium text-gray-700">Preview Height (px):</label>
+                                <input type="number" id="previewHeight" value={cameraSettings.previewHeight} onChange={(e) => setCameraSettings(prev => ({ ...prev, previewHeight: parseInt(e.target.value, 10) || prev.previewHeight }))} className="w-full p-2.5 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"/>
+                            </div>
+                        </div>
+                    </div>
+                    
                     <button
                         onClick={() => {
-                            setAppliedCameraSettings(cameraSettings); // This will trigger useEffect
+                            const newAppliedSettings = {
+                                ...cameraSettings,
+                                frameRate: Math.max(1, Math.min(30, parseInt(cameraSettings.frameRate, 10) || 10)),
+                                jpegQuality: Math.max(0.1, Math.min(1.0, parseFloat(cameraSettings.jpegQuality) || 0.75)),
+                                previewWidth: Math.max(160, Math.min(1280, parseInt(cameraSettings.previewWidth, 10) || 320)), // Min width 160
+                                previewHeight: Math.max(120, Math.min(720, parseInt(cameraSettings.previewHeight, 10) || 240)), // Min height 120
+                            };
+                            setCameraSettings(newAppliedSettings); 
+                            setAppliedCameraSettings(newAppliedSettings);
                             setShowSettings(false);
                         }}
                         className="w-full px-4 py-2.5 bg-indigo-600 text-white font-semibold rounded-md shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
@@ -360,28 +537,100 @@ export default function RubiksSolverPage() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                     <div className="flex flex-col items-center p-3 bg-slate-100 rounded-lg">
                         <div className="mb-2 text-center font-semibold text-slate-700">Camera Feed (Local Preview)</div>
-                        <div className="relative w-[320px] h-[240px] rounded-md overflow-hidden border-2 border-slate-300 bg-slate-900 flex items-center justify-center shadow-inner">
+                        <div 
+                            style={{ 
+                                width: `${appliedCameraSettings.previewWidth}px`, 
+                                height: `${appliedCameraSettings.previewHeight}px` 
+                            }}
+                            className="relative rounded-md overflow-hidden border-2 border-slate-300 bg-slate-900 flex items-center justify-center shadow-inner"
+                        >
                             {appliedCameraSettings.useIpCamera ? (
                                 <img 
                                     ref={ipCamImgRef} 
-                                    key={appliedCameraSettings.ipCameraAddress} // Forces re-render if URL changes
-                                    src={appliedCameraSettings.ipCameraAddress} 
-                                    alt="IP Camera Preview" width={320} height={240} className="object-contain" crossOrigin="anonymous" 
+                                    key={appliedCameraSettings.ipCameraAddress} 
+                                    src={(gameStarted && appliedCameraSettings.ipCameraAddress) ? appliedCameraSettings.ipCameraAddress : undefined}
+                                    alt="IP Camera Preview" 
+                                    className="object-contain max-w-full max-h-full"
+                                    crossOrigin="anonymous" 
                                     onLoad={() => { console.log("IP Cam image loaded."); setIsCameraLoading(false);}} 
-                                    onError={() => { console.error("IP Cam image error."); setGameState(prev => ({...prev, error_message: "IP Cam Preview Error."})); setIsCameraLoading(false);}}
+                                    onError={() => { 
+                                        if (gameStarted && appliedCameraSettings.ipCameraAddress) { 
+                                            console.error("IP Cam image error."); 
+                                            setGameState(prev => ({...prev, error_message: "IP Cam Preview Error."})); 
+                                        }
+                                        setIsCameraLoading(false);
+                                    }}
                                 />
                             ) : (
-                                <video ref={videoRef} autoPlay playsInline muted width={320} height={240} className="object-contain" />
+                                <video 
+                                    ref={videoRef} 
+                                    autoPlay 
+                                    playsInline 
+                                    muted 
+                                    width={appliedCameraSettings.previewWidth}
+                                    height={appliedCameraSettings.previewHeight}
+                                    className="object-contain max-w-full max-h-full"
+                                />
                             )}
-                            {isCameraLoading && <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-60 text-white text-lg font-semibold">Loading Preview...</div>}
+                            {isCameraLoading && gameStarted && <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-60 text-white text-lg font-semibold">Loading Preview...</div>}
+                            <div style={cropOverlayStyle}></div>
                         </div>
-                        <canvas ref={canvasRef} className="hidden" /> {/* Keep hidden for frame grabbing */}
+                        <canvas ref={canvasRef} className="hidden" />
+
+                        <div className="mt-4 w-full max-w-xs space-y-3 p-2 bg-white/50 rounded-md">
+                            <div>
+                                <label htmlFor="zoom" className="block text-xs font-medium text-gray-700">Zoom: {Number(cameraAdjustments.zoom).toFixed(1)}x</label>
+                                <input
+                                    type="range" id="zoom" min="1" max="5" step="0.1"
+                                    value={cameraAdjustments.zoom}
+                                    onChange={(e) => setCameraAdjustments(prev => ({ ...prev, zoom: parseFloat(e.target.value) }))}
+                                    className="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                                    disabled={!gameStarted}
+                                />
+                            </div>
+                            <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                                <div>
+                                    <label htmlFor="cropX" className="block text-xs font-medium text-gray-700">Crop X ({Number(cameraAdjustments.crop.x * 100).toFixed(0)}%)</label>
+                                    <input type="range" id="cropX" min="0" max="1" step="0.01" value={cameraAdjustments.crop.x} onChange={e => handleCropChange('x', e.target.value)} className="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-indigo-600" disabled={!gameStarted}/>
+                                </div>
+                                <div>
+                                    <label htmlFor="cropY" className="block text-xs font-medium text-gray-700">Crop Y ({Number(cameraAdjustments.crop.y * 100).toFixed(0)}%)</label>
+                                    <input type="range" id="cropY" min="0" max="1" step="0.01" value={cameraAdjustments.crop.y} onChange={e => handleCropChange('y', e.target.value)} className="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-indigo-600" disabled={!gameStarted}/>
+                                </div>
+                                <div>
+                                    <label htmlFor="cropW" className="block text-xs font-medium text-gray-700">Crop W ({Number(cameraAdjustments.crop.width * 100).toFixed(0)}%)</label>
+                                    <input type="range" id="cropW" min="0.1" max="1" step="0.01" value={cameraAdjustments.crop.width} onChange={e => handleCropChange('width', e.target.value)} className="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-indigo-600" disabled={!gameStarted}/>
+                                </div>
+                                <div>
+                                    <label htmlFor="cropH" className="block text-xs font-medium text-gray-700">Crop H ({Number(cameraAdjustments.crop.height * 100).toFixed(0)}%)</label>
+                                    <input type="range" id="cropH" min="0.1" max="1" step="0.01" value={cameraAdjustments.crop.height} onChange={e => handleCropChange('height', e.target.value)} className="w-full h-2 bg-gray-300 rounded-lg appearance-none cursor-pointer accent-indigo-600" disabled={!gameStarted}/>
+                                </div>
+                            </div>
+                            <button 
+                                onClick={() => setCameraAdjustments({ zoom: 1, crop: { x: 0, y: 0, width: 1, height: 1 }})}
+                                className="w-full mt-2 px-3 py-1.5 bg-slate-300 text-slate-700 text-xs rounded hover:bg-slate-400 disabled:opacity-50"
+                                disabled={!gameStarted}
+                            >
+                                Reset Zoom & Crop
+                            </button>
+                        </div>
                     </div>
+
                     <div className="flex flex-col items-center p-3 bg-slate-100 rounded-lg">
                         <div className="mb-2 text-center font-semibold text-slate-700">Processed View (from Backend)</div>
-                        <div className="relative w-[320px] h-[240px] rounded-md overflow-hidden border-2 border-slate-300 bg-slate-900 flex items-center justify-center shadow-inner">
+                        <div 
+                            style={{ 
+                                width: `${appliedCameraSettings.previewWidth}px`, 
+                                height: `${appliedCameraSettings.previewHeight}px` 
+                            }}
+                            className="relative rounded-md overflow-hidden border-2 border-slate-300 bg-slate-900 flex items-center justify-center shadow-inner"
+                        >
                             {processedFrame ? (
-                                <img src={processedFrame} width={320} height={240} alt="Processed Frame" className="object-contain"/>
+                                <img 
+                                    src={processedFrame} 
+                                    alt="Processed Frame" 
+                                    className="object-contain max-w-full max-h-full"
+                                />
                             ) : (
                                 <span className="text-slate-500 text-center p-2">{gameStarted ? "Waiting for backend frame..." : "Game stopped."}</span>
                             )}
