@@ -146,7 +146,7 @@ class GameSession:
             
             # 1.1: Move to source position (from_pos) and pick up piece
             logger.info(f"[ARM DEBUG] 1.1: Moving to source {from_pos}: {from_angles} to pick up.")
-            await self.send_command_to_esp32(*from_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
+            await self.send_command_to_esp32(*from_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
             await asyncio.sleep(move_delay)
             
             # 1.2: Move to home position with piece
@@ -161,7 +161,7 @@ class GameSession:
             
             # 1.4: Return to home position (empty)
             logger.info(f"[ARM DEBUG] 1.4: Returning to home {home_angles} (empty).")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(move_delay)
             
             # Step 2: Move second piece (from to_pos) to the first piece's original position (from_pos)
@@ -169,7 +169,7 @@ class GameSession:
             
             # 2.1: Move to second piece's current position (to_pos) and pick up
             logger.info(f"[ARM DEBUG] 2.1: Moving to source {to_pos}: {to_angles} to pick up.")
-            await self.send_command_to_esp32(*to_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
+            await self.send_command_to_esp32(*to_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
             await asyncio.sleep(move_delay)
             
             # 2.2: Move to home position with second piece
@@ -184,7 +184,7 @@ class GameSession:
             
             # 2.4: Return to home position (empty)
             logger.info(f"[ARM DEBUG] 2.4: Returning to home {home_angles} (empty).")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(move_delay)
             
             # Step 3: Move first piece (from temp_position) to the second piece's original position (to_pos)
@@ -192,7 +192,7 @@ class GameSession:
             
             # 3.1: Move to temp position and pick up first piece
             logger.info(f"[ARM DEBUG] 3.1: Moving to temp position {temp_position} to pick up first piece.")
-            await self.send_command_to_esp32(*temp_position, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
+            await self.send_command_to_esp32(*temp_position, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
             await asyncio.sleep(move_delay)
             
             # 3.2: Move to home position with first piece
@@ -207,7 +207,7 @@ class GameSession:
             
             # 3.4: Return to home position with magnet off (final state for this swap)
             logger.info(f"[ARM DEBUG] 3.4: Final return to home {home_angles} (inactive, empty).")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
+            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_TRUE)
             await asyncio.sleep(move_delay)
             
             logger.info(f"[ARM DEBUG] Swap sequence completed successfully: {from_pos} ⟷ {to_pos}")
@@ -453,24 +453,24 @@ class GameSession:
         from_angles = self.arm_positions[from_pos]
         to_angles = self.arm_positions[to_pos]
         home_angles = self.ARM_HOME
-        temp_position = [90, 10, 120]
+        temp_position = [90, 0, 120]
         # The full sequence as a list of dicts (step, angles, enable, pickup)
         sequence = [
             # Step 1: from_pos -> temp
-            {"desc": "Pick from source", "angles": from_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Pick from source", "angles": from_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
             {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
             {"desc": "Move to temp and release", "angles": temp_position, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Return to home empty", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": "Return to home empty", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
             # Step 2: to_pos -> from_pos
-            {"desc": "Pick from destination", "angles": to_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Pick from destination", "angles": to_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
             {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
             {"desc": "Move to source and release", "angles": from_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Return to home empty", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": "Return to home empty", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
             # Step 3: temp -> to_pos
-            {"desc": "Pick from temp", "angles": temp_position, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Pick from temp", "angles": temp_position, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
             {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
             {"desc": "Move to destination and release", "angles": to_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Final return to home", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": "Final return to home", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
         ]
         return sequence
 
