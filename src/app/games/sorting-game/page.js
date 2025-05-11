@@ -17,7 +17,7 @@ export default function SortingGamePage() {
   const [showSettings, setShowSettings] = useState(false);
   const [cameraSettings, setCameraSettings] = useState({
     useIpCamera: false,
-    ipCameraAddress: "http://192.168.137.178:4747/video",
+    ipCameraAddress: "http://192.168.137.135:4747/video",
   });
   const [appliedCameraSettings, setAppliedCameraSettings] = useState({
     useIpCamera: false,
