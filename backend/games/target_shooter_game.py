@@ -7,16 +7,16 @@ import base64
 import os
 import threading
 import asyncio
-import json # Added for process_command if it receives JSON strings
-from starlette.websockets import WebSocketState, WebSocketDisconnect # For checking websocket state and handling disconnections
-import queue # Add for frame streaming
+import json
+from starlette.websockets import WebSocketState, WebSocketDisconnect
+import queue
 
 # --- Default Constants ---
 CONF_THRESHOLD_DEFAULT = 0.7
 FOCAL_LENGTH_DEFAULT = 580
-BALLOON_WIDTH_DEFAULT = 0.18 # This is a property of the balloon, less likely to be changed by user often
-TARGET_COLOR_DEFAULT = "yellow"
-IMAGE_WIDTH = 640 # Assuming fixed processing size
+BALLOON_WIDTH_DEFAULT = 0.18
+TARGET_COLOR_DEFAULT = "red"
+IMAGE_WIDTH = 640
 IMAGE_HEIGHT = 480
 X_CAMERA_FOV = 86
 Y_CAMERA_FOV = 53
@@ -31,7 +31,14 @@ INIT_TILT = 90
 MOVEMENT_COOLDOWN = 0.2
 NO_BALLOON_TIMEOUT = 10
 RETURN_TO_CENTER_DELAY = 1.0
-CAPTURE_FPS_TARGET = 30 # Target FPS for camera capture loop
+CAPTURE_FPS_TARGET = 30
+
+# Global model path
+YOLO_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "games/TargetDetection/runs/detect/train/weights/best.pt"
+)
 
 class VideoStream:
     def __init__(self, src):
@@ -59,16 +66,15 @@ class VideoStream:
         self.cap.release()
 
 class GameSession:
-    def __init__(self, config):
-        self.esp32_client = config.get("esp32_client")  # Only use esp32_client
-        self.webcam_ip = "http://192.168.49.1:4747/video" # Default if not provided
+    def __init__(self, config, esp32_client=None):
+        self.esp32_client = esp32_client
+        self.webcam_ip = "http://192.168.86.206:4747/video"
 
-        model_path_config = config.get("model_path", "games/TargetDetection/runs/detect/train/weights/best.pt")
-        backend_base_dir = os.path.join(os.path.dirname(__file__), "..")
-        model_path_abs = os.path.join(backend_base_dir, model_path_config)
+        # Use global YOLO_MODEL_PATH, ignore config for model path
+        model_path_abs = YOLO_MODEL_PATH
         if not os.path.exists(model_path_abs):
-            print(f"Warning: Model not found at {model_path_abs}. Using relative path: {model_path_config}")
-            model_path_abs = model_path_config
+            print(f"Warning: Model not found at {model_path_abs}. Using fallback relative path.")
+            model_path_abs = "games/TargetDetection/runs/detect/train/weights/best.pt"
         try:
             self.model = YOLO(model_path_abs)
             print(f"Loaded YOLO model from: {model_path_abs}")
@@ -76,7 +82,6 @@ class GameSession:
             print(f"Error loading YOLO model from {model_path_abs}: {e}")
             self.model = None
 
-        # Instance variables for parameters, initialized from config or defaults
         self.focal_length = float(config.get("focal_length", FOCAL_LENGTH_DEFAULT))
         self.laser_offset_cm_x = float(config.get("laser_offset_cm_x", LASER_OFFSET_CM_X_DEFAULT))
         self.laser_offset_cm_y = float(config.get("laser_offset_cm_y", LASER_OFFSET_CM_Y_DEFAULT))
@@ -89,7 +94,6 @@ class GameSession:
         self.balloon_width = float(config.get("balloon_width", BALLOON_WIDTH_DEFAULT))
         self.no_balloon_timeout_setting = float(config.get("no_balloon_timeout", NO_BALLOON_TIMEOUT))
 
-        # Game state variables
         self.current_pan = INIT_PAN
         self.current_tilt = INIT_TILT
         self.depth = 150.0
@@ -97,32 +101,49 @@ class GameSession:
         self.last_movement_time = 0
         self.last_balloon_detected_time = time.time()
         self.game_over_due_to_timeout = False
-        self.game_requested_stop = False # For graceful end game
+        self.game_requested_stop = False
 
-        # Webcam and processing thread attributes
+        self.shot_balloons = []
+        self.current_target_initial_coords = None
+        self.is_at_initial_position = True
+
         self.websocket = None
         self.capture_thread = None
         self.stop_event = threading.Event()
-        self._async_loop = None # To store the asyncio loop for threadsafe calls
-        self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
+        self._async_loop = None
+        self.frame_queue = queue.Queue(maxsize=100)
         self.video_stream = None
 
-        # Initial hardware homing is done here, using esp32_client only
-        if self.esp32_client:
-            asyncio.run(self.send_command_to_esp32(INIT_PAN, INIT_TILT, shoot_command=False))
-            print("TargetShooter: Initialized and sent home command to ESP32.")
-        else:
-            print("TargetShooter: No hardware interface available.")
+    async def _send_switch_command(self):
+        if self.esp32_client is None:
+            print("[ESP32] No ESP32 client available, skipping switch command")
+            return False
+        try:
+            print("[ESP32] Sending switch command to activate SHOOTER mode")
+            await self.esp32_client.send_json({
+                "action": "switch",
+                "game": "SHOOTER"
+            })
+            return True
+        except Exception as e:
+            print(f"[ESP32] Error sending switch command: {e}")
+            return False
 
     async def manage_game_loop(self, websocket):
         self.websocket = websocket
-        self._async_loop = asyncio.get_running_loop() # Get the loop uvicorn is running on
+        # Store the event loop from the main thread so we can use it from background threads
+        self._async_loop = asyncio.get_running_loop()
+        print("TargetShooter: Stored main event loop for cross-thread communication")
+
+        print("TargetShooter: Starting game loop.")
+        if self.esp32_client is not None:
+            await self._send_switch_command()
 
         self.stop_event.clear()
-        self.game_requested_stop = False # Reset for new game session
-        self.game_over_due_to_timeout = False # Reset
-        self.last_balloon_detected_time = time.time() # Reset timeout timer
-        self.shot_angles = [] # Reset shot angles for a new game
+        self.game_requested_stop = False
+        self.game_over_due_to_timeout = False
+        self.last_balloon_detected_time = time.time()
+        self.shot_angles = []
 
         self.capture_thread = threading.Thread(target=self._capture_and_process_task, daemon=True)
         self.capture_thread.start()
@@ -137,11 +158,10 @@ class GameSession:
                 message_text = await self.websocket.receive_text()
                 try:
                     command_data = json.loads(message_text)
-                    response = self.process_command(command_data) # process_command is sync
+                    response = self.process_command(command_data)
                     if self.websocket and self.websocket.client_state == WebSocketState.CONNECTED:
                         await self.websocket.send_json(response)
                     
-                    # Check flags that might be set by process_command
                     if self.game_requested_stop:
                         print("TargetShooter: Game stop requested by command.")
                         break 
@@ -164,18 +184,16 @@ class GameSession:
 
     def _capture_and_process_task(self):
         print(f"TargetShooter: Attempting to open camera: {self.webcam_ip}")
-        # Use threaded video capture for faster frame acquisition
         self.video_stream = VideoStream(self.webcam_ip)
-        time.sleep(1) # Give camera time to initialize
+        time.sleep(1)
 
-        # Check if stream is opened
         ret, frame = self.video_stream.read()
         if not ret or frame is None:
             print(f"TargetShooter: CRITICAL - Failed to open camera stream at {self.webcam_ip}")
             error_msg = {"status": "error", "message": f"Failed to open camera: {self.webcam_ip}"}
             if self.websocket and self._async_loop:
                 asyncio.run_coroutine_threadsafe(self.websocket.send_json(error_msg), self._async_loop)
-            self.stop_event.set() # Signal main loop to stop
+            self.stop_event.set()
             return
 
         print(f"TargetShooter: Camera {self.webcam_ip} opened successfully.")
@@ -192,10 +210,8 @@ class GameSession:
 
                 response_data = self._process_single_frame_logic(frame)
 
-                # --- STREAM: Put processed frame in queue for HTTP streaming ---
                 if response_data.get("processed_frame"):
                     try:
-                        # Only keep the latest frame, drop old if queue is full
                         if self.frame_queue.full():
                             try:
                                 self.frame_queue.get_nowait()
@@ -205,7 +221,6 @@ class GameSession:
                     except Exception as qerr:
                         print(f"Frame queue error: {qerr}")
 
-                # --- WEBSOCKET: Send JSON as before ---
                 if self.websocket and self.websocket.client_state == WebSocketState.CONNECTED and self._async_loop:
                     asyncio.run_coroutine_threadsafe(self.websocket.send_json(response_data), self._async_loop)
                 
@@ -215,9 +230,6 @@ class GameSession:
                     break
 
                 elapsed_time = time.time() - loop_start_time
-                # sleep_time = frame_delay - elapsed_time
-                # if sleep_time > 0:
-                #     time.sleep(sleep_time)
 
             except Exception as e:
                 print(f"TargetShooter: Error in capture/process task: {e}")
@@ -229,63 +241,120 @@ class GameSession:
 
     def get_stream_generator(self):
         """
-        Yields multipart JPEG frames for HTTP streaming.
+        Yields multipart JPEG frames for HTTP streaming with corrected formatting
+        using pre-defined byte strings for robustness.
+        Ensures cv2.imencode results are converted to bytes.
         """
-        boundary = "frame"
+        boundary_str = "frame"
+        boundary = b"--" + boundary_str.encode()
+        boundary_end = b"--" + boundary_str.encode() + b"--\r\n"
+        
+        content_type_header = b"Content-Type: image/jpeg\r\n"
+        crlf = b"\r\n"
+
+        print("Stream generator started")
+        frame_count = 0
+        
+        # Initial greeting frame
+        img = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, 3), dtype=np.uint8)
+        cv2.putText(img, "Target Shooter Stream Starting...", (50, IMAGE_HEIGHT // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        ret_val, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        
+        jpg_bytes_initial = b''
+        if ret_val:
+            jpg_bytes_initial = buffer.tobytes()
+        else:
+            print("Stream generator: Failed to encode initial frame.")
+        
+        # Send initial frame
+        yield boundary + crlf
+        yield content_type_header
+        yield f"Content-Length: {len(jpg_bytes_initial)}\r\n".encode() 
+        yield crlf
+        yield jpg_bytes_initial
+        yield crlf
+        
         while not self.stop_event.is_set():
             try:
-                b64_frame = self.frame_queue.get(timeout=2)
+                b64_frame = self.frame_queue.get(timeout=0.5) 
+                
+                if not b64_frame:
+                    print("Stream generator: got None from queue, skipping.")
+                    continue
+                    
                 jpg_bytes = base64.b64decode(b64_frame)
-                yield (
-                    b"--%b\r\n"
-                    b"Content-Type: image/jpeg\r\n"
-                    b"Content-Length: %d\r\n\r\n" % (boundary.encode(), len(jpg_bytes))
-                )
+                
+                yield boundary + crlf
+                yield content_type_header
+                yield f"Content-Length: {len(jpg_bytes)}\r\n".encode()
+                yield crlf
                 yield jpg_bytes
-                yield b"\r\n"
+                yield crlf
+                
+                frame_count += 1
+                if frame_count % 100 == 0:
+                    print(f"Streamed {frame_count} frames")
+                    
             except queue.Empty:
-                continue
+                img_placeholder = np.zeros((IMAGE_HEIGHT, IMAGE_WIDTH, 3), dtype=np.uint8)
+                cv2.putText(img_placeholder, "Waiting for frames...", (50, IMAGE_HEIGHT // 2), cv2.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 200), 2)
+                ret_val_ph, buffer_ph = cv2.imencode('.jpg', img_placeholder, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                
+                jpg_bytes_placeholder = b''
+                if ret_val_ph:
+                    jpg_bytes_placeholder = buffer_ph.tobytes()
+                else:
+                    print("Stream generator: Failed to encode placeholder frame.")
+
+                yield boundary + crlf
+                yield content_type_header
+                yield f"Content-Length: {len(jpg_bytes_placeholder)}\r\n".encode()
+                yield crlf
+                yield jpg_bytes_placeholder
+                yield crlf
+            except base64.binascii.Error as b64_error:
+                print(f"Stream generator: Base64 decode error: {b64_error}. Skipping frame.")
             except Exception as e:
                 print(f"Stream generator error: {e}")
-                break
+                if self.stop_event.is_set():
+                    break
+                
+        yield boundary_end
         print("Stream generator exiting.")
 
-    async def send_command_to_esp32(self, pan_angle, tilt_angle, shoot_command=False):
-        """Send servo command to ESP32 via WebSocket (same as tictactoe.py logic)"""
-        if self.esp32_client is None:
-            print("[ESP32] No ESP32 client available, skipping command")
-            return False
-        try:
-            pan = int(round(pan_angle))
-            tilt = int(round(tilt_angle))
-            if shoot_command:
-                # Use a special command string for shoot
-                command = "SHOOT"
-            else:
-                # Format: "pan,tilt,0,0,0" (the extra zeros are placeholders for compatibility)
-                command = f"{pan},{tilt},0,0,0"
-            print(f"[ESP32] Sending command: {command}")
-            await self.esp32_client.send_json({
-                "action": "command",
-                "command": command
-            })
-            return True
-        except Exception as e:
-            print(f"[ESP32] Error sending command: {e}")
-            return False
-
-    def _run_esp32(self, coro):
-        # Helper: run coroutine in main loop from thread, or fallback
-        loop = self._main_loop if hasattr(self, "_main_loop") else None
-        if not loop and hasattr(self, "_async_loop"):
-            loop = self._async_loop
-        if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(coro, loop)
-        else:
+    def send_to_arduino(self, pan_angle, tilt_angle, shoot_command=False):
+        if self.esp32_client is not None:
             try:
-                asyncio.run(coro)
-            except RuntimeError:
-                pass  # No event loop, ignore
+                if shoot_command:
+                    command = "SHOOT"
+                else:
+                    command = f"{int(round(pan_angle))},{int(round(tilt_angle))}"
+                print(f"[ESP32] Sending command: {command}")
+                
+                if self._async_loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self.esp32_client.send_json({
+                            "action": "command",
+                            "command": command
+                        }),
+                        self._async_loop
+                    )
+                    time.sleep(0.05)
+                    return True
+                else:
+                    print("[ESP32] No event loop available, cannot send command")
+                    return False
+            except Exception as e:
+                print(f"[ESP32] Error sending command: {e}")
+                return False
+        print("[ESP32] No ESP32 client available, skipping command")
+        return False
+
+    def wait_for_ack(self, timeout=40):
+        if self.esp32_client is not None:
+            print("[ESP32] Skipping wait_for_ack (not implemented for ESP32)")
+            return True
+        return False
 
     def _calculate_error(self, target_x, target_y):
         center_x = IMAGE_WIDTH / 2
@@ -310,17 +379,20 @@ class GameSession:
 
     def _get_color_name(self, bgr):
         r, g, b = bgr[2], bgr[1], bgr[0]
-        # Simplified for common target colors, can be expanded
-        if r > 160 and g > 140 and b < 100: return "yellow" # Yellow
-        if r > 150 and g < 100 and b < 100: return "red"    # Red
-        if r < 100 and g > 150 and b < 100: return "green"  # Green
-        # Fallback for other colors
-        if r > 150 and g > 70 and g < 150 and b > 70 and b < 150: return "red-ish"
-        elif r < 140 and g > 150 and b < 170: return "green-ish"
-        elif r < 175 and g < 175 and b > 150: return "blue"
-        elif r < 50 and g < 50 and b < 50: return "black"
-        elif r > 200 and g > 200 and b > 200: return "white"
-        return f"rgb({int(r)},{int(g)},{int(b)})"
+        if r > 150 and g > 70 and g<150 and b > 70 and b<150:
+         return "red"
+        elif r < 140 and g > 150 and b < 170:
+            return "green"
+        elif r < 175 and g < 175 and b > 150:
+            return "blue"
+        elif r > 160 and g > 140 and  b < 100:
+            return "yellow"
+        elif r < 50 and g < 50 and b < 50:
+            return "black"
+        elif r > 200 and g > 200 and b > 200:
+            return "white"
+        else:
+            return f"rgb({int(r)}, {int(g)}, {int(b)})"
 
     def _is_target_centered(self, error_x, error_y):
         return abs(error_x) < self.center_tolerance and abs(error_y) < self.center_tolerance
@@ -328,6 +400,13 @@ class GameSession:
     def _is_angle_already_shot(self, pan, tilt, threshold=5):
         for shot_pan, shot_tilt in self.shot_angles:
             if abs(pan - shot_pan) < threshold and abs(tilt - shot_tilt) < threshold:
+                return True
+        return False
+    
+    def _is_balloon_already_shot(self, center_x, center_y, threshold=50):
+        for shot_x, shot_y in self.shot_balloons:
+            distance = math.sqrt((center_x - shot_x) ** 2 + (center_y - shot_y) ** 2)
+            if distance < threshold:
                 return True
         return False
 
@@ -340,14 +419,12 @@ class GameSession:
 
         fov_rad_x = math.radians(X_CAMERA_FOV)
         fov_rad_y = math.radians(Y_CAMERA_FOV)
-        # Use self.depth for calculations
         width_at_target = 2 * self.depth * math.tan(fov_rad_x / 2) if self.depth > 0 else 1
         height_at_target = 2 * self.depth * math.tan(fov_rad_y / 2) if self.depth > 0 else 1
         
         pixels_per_cm_x = IMAGE_WIDTH / width_at_target if width_at_target > 0 else 1
         pixels_per_cm_y = IMAGE_HEIGHT / height_at_target if height_at_target > 0 else 1
 
-        # Use self.laser_offset_cm_x and self.laser_offset_cm_y
         shooter_x_offset = int(self.laser_offset_cm_x * pixels_per_cm_x)
         shooter_y_offset = int(self.laser_offset_cm_y * pixels_per_cm_y)
         shooter_x = center_x + shooter_x_offset
@@ -371,27 +448,23 @@ class GameSession:
             self.no_balloon_timeout_setting = float(command_data.get("no_balloon_timeout", self.no_balloon_timeout_setting))
             response_message = f"Parameters updated. FL:{self.focal_length}, OffsetX:{self.laser_offset_cm_x}, OffsetY:{self.laser_offset_cm_y}, Color:{self.target_color}, Timeout: {self.no_balloon_timeout_setting}"
             
-            if action == "initial_config": # Reset game state on initial config
+            if action == "initial_config":
                 print("TargetShooter: Received initial_config, resetting game state for new session.")
                 self.shot_angles = []
                 self.game_over_due_to_timeout = False
-                self.game_requested_stop = False # Crucial to reset this
-                self.last_balloon_detected_time = time.time() # Reset timeout timer
-                if self.esp32_client:
-                    self._run_esp32(self.send_command_to_esp32(INIT_PAN, INIT_TILT, shoot_command=False))
+                self.game_requested_stop = False
+                self.last_balloon_detected_time = time.time()
         elif action == "reset_shot_angles":
             self.shot_angles = []
             response_message = "Shot angles reset."
         elif action == "end_game":
             self.game_requested_stop = True
-            self.stop_event.set() # Also signal the capture loop
+            self.stop_event.set()
             response_message = "Game end requested. Stopping..."
         elif action == "emergency_stop":
-            self.game_requested_stop = True # Ensure frame processing stops
-            self.stop_event.set() # Signal all loops
-            if self.esp32_client:
-                self._run_esp32(self.send_command_to_esp32(INIT_PAN, INIT_TILT, shoot_command=False))
-            response_message = "Emergency stop: Hardware reset, game stopping."
+            self.game_requested_stop = True
+            self.stop_event.set()
+            response_message = "Emergency stop: Game stopping."
         else:
             response_message = f"Unknown command: {action}"
         
@@ -416,13 +489,13 @@ class GameSession:
             "center_tolerance": self.center_tolerance,
         }
 
-    def _process_single_frame_logic(self, frame_mat): # Renamed from process_frame, takes matrix
+    def _process_single_frame_logic(self, frame_mat):
         if self.model is None:
             return {"status": "error", "message": "YOLO Model not loaded.", "processed_frame": None, "game_state": self.get_current_game_state_dict()}
         
         if self.game_over_due_to_timeout or self.game_requested_stop or self.stop_event.is_set():
             msg = "Game ended: Timeout." if self.game_over_due_to_timeout else "Game ended: User request."
-            if self.stop_event.is_set() and not (self.game_over_due_to_timeout or self.game_requested_stop) :
+            if self.stop_event.is_set() and not (self.game_over_due_to_timeout or self.game_requested_stop):
                  msg = "Game ended: System stop."
             return {"status": "ended", "message": msg, "processed_frame": None, "game_state": self.get_current_game_state_dict()}
 
@@ -435,12 +508,17 @@ class GameSession:
         balloon_detected_this_frame = False
         status_message = "Processing..."
 
-        # Actually run YOLO prediction here (was commented out before)
         results = self.model.predict(source=frame, show=False, verbose=False, conf=self.conf_threshold)
         self._draw_crosshair(frame)
 
         best_target = None
+        target_found = False
+
         best_confidence = 0
+        if abs(self.current_pan - INIT_PAN) < 1 and abs(self.current_tilt - INIT_TILT) < 1:
+          is_at_initial_position = True
+        else:
+          is_at_initial_position = False
 
         for result in results:
             if result.boxes is None or len(result.boxes) == 0:
@@ -458,13 +536,12 @@ class GameSession:
                 center_x = (x1 + x2) // 2
                 center_y = (y1 + y2) // 2
 
+                if self.is_at_initial_position and self._is_balloon_already_shot(center_x, center_y):
+                    print(f"Skipping balloon at ({center_x}, {center_y}) - already shot")
+                    continue
+
                 error_x_calc, error_y_calc = self._calculate_error(center_x, center_y)
                 target_pan_for_check, target_tilt_for_check = self._calculate_new_angles(error_x_calc, error_y_calc)
-
-                if self._is_angle_already_shot(target_pan_for_check, target_tilt_for_check, threshold=15):
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                    cv2.putText(frame, "Already Shot", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                    continue
                 
                 balloon_detected_this_frame = True
 
@@ -487,7 +564,13 @@ class GameSession:
                 
                 if confs[i] > best_confidence:
                     best_confidence = confs[i]
-                    best_target = {'pos': (center_x, center_y), 'box': (x1, y1, x2, y2), 'info': info_text}
+                    best_target = {
+                    'pos': (center_x, center_y),
+                    'box': (x1, y1, x2, y2),
+                    'info': info_text,
+                    'initial_coords': (center_x, center_y) if self.is_at_initial_position else self.current_target_initial_coords
+                }
+                target_found = True
                 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(frame, info_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
@@ -498,12 +581,15 @@ class GameSession:
             status_message = f"No unshot {self.target_color} balloons for {self.no_balloon_timeout_setting}s. Game Over."
             print(status_message)
             self.game_over_due_to_timeout = True
-            if self.esp32_client:
-                self._run_esp32(self.send_command_to_esp32(INIT_PAN, INIT_TILT, shoot_command=False))
+            self.send_to_arduino(INIT_PAN, INIT_TILT)
         
-        if best_target and (current_time - self.last_movement_time) > MOVEMENT_COOLDOWN:
+        current_time = time.time()
+        if target_found and (current_time - self.last_movement_time) > MOVEMENT_COOLDOWN:
             self.last_movement_time = current_time
             center_x, center_y = best_target['pos']
+            if self.is_at_initial_position:
+                 current_target_initial_coords = best_target['initial_coords']
+        
             error_x, error_y = self._calculate_error(center_x, center_y)
             
             frame_center_x, frame_center_y = IMAGE_WIDTH // 2, IMAGE_HEIGHT // 2
@@ -515,39 +601,43 @@ class GameSession:
                 
                 if not self._is_angle_already_shot(self.current_pan, self.current_tilt):
                     print(f"FIRE! at angles: Pan={self.current_pan:.1f}, Tilt={self.current_tilt:.1f}, Depth: {self.depth:.1f}cm")
-                    shoot_sent = False
-                    if self.esp32_client:
-                        self._run_esp32(self.send_command_to_esp32(self.current_pan, self.current_tilt, shoot_command=True))
-                        shoot_sent = True
-                    if shoot_sent:
+                    if self.send_to_arduino(self.current_pan, self.current_tilt, shoot_command=True):
                         status_message = "SHOOT command sent."
-                        # For ESP32, assume success for now
-                        self.shot_angles.append((self.current_pan, self.current_tilt))
-                        print("Returning to initial position...")
-                        self.current_pan, self.current_tilt = INIT_PAN, INIT_TILT
-                        if self.esp32_client:
-                            self._run_esp32(self.send_command_to_esp32(self.current_pan, self.current_tilt, shoot_command=False))
-                        time.sleep(RETURN_TO_CENTER_DELAY)
-                        self.last_balloon_detected_time = time.time()
+                        if self.wait_for_ack():
+                            status_message = "Balloon shot! ACK received."
+                            if current_target_initial_coords is not None:
+                                self.shot_balloons.append(current_target_initial_coords)
+                                print(f"Stored initial coords: {current_target_initial_coords}")
+                    
+                            current_target_initial_coords = None
+                                                            
+                            print("Returning to initial position...")
+                            self.current_pan, self.current_tilt = INIT_PAN, INIT_TILT
+                            self.send_to_arduino(self.current_pan, self.current_tilt)
+                            time.sleep(RETURN_TO_CENTER_DELAY)
+                            self.last_balloon_detected_time = time.time()
+                        else:
+                            status_message = "Shoot sent, but NO ACK. Retrying aim or hold."
                     else:
                         status_message = "Failed to send SHOOT command."
             else:
                 new_pan, new_tilt = self._calculate_new_angles(error_x, error_y)
                 if abs(new_pan - self.current_pan) > 0.5 or abs(new_tilt - self.current_tilt) > 0.5:
                     self.current_pan, self.current_tilt = new_pan, new_tilt
-                    if self.esp32_client:
-                        self._run_esp32(self.send_command_to_esp32(self.current_pan, self.current_tilt, shoot_command=False))
+                    self.send_to_arduino(self.current_pan, self.current_tilt)
                     status_message = f"Moving: Pan={int(self.current_pan)} Tilt={int(self.current_tilt)}"
+                else:
+                    status_message = "Target found, holding position."
         elif best_target:
             status_message = "Target found, waiting for movement cooldown."
-        elif not balloon_detected_this_frame and not self.game_over_due_to_timeout and not self.game_requested_stop :
+        elif not balloon_detected_this_frame and not self.game_over_due_to_timeout and not self.game_requested_stop:
              status_message = f"Scanning for {self.target_color} balloons..."
 
         cv2.putText(frame, f"Pan: {int(self.current_pan)} Tilt: {int(self.current_tilt)}", (10, IMAGE_HEIGHT - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         cv2.putText(frame, f"Status: {status_message}", (10, IMAGE_HEIGHT - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         cv2.putText(frame, f"Timeout in: {max(0, self.no_balloon_timeout_setting - (current_time - self.last_balloon_detected_time)):.1f}s", (10, IMAGE_HEIGHT - 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,100,100),1)
 
-        _, jpg_frame = cv2.imencode('.jpg', frame)
+        _, jpg_frame = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
         b64_frame = base64.b64encode(jpg_frame).decode('utf-8')
 
         current_status_is_ended = self.game_over_due_to_timeout or self.game_requested_stop or self.stop_event.is_set()
@@ -568,13 +658,13 @@ class GameSession:
                 self.capture_thread.join(timeout=3.0)
                 if self.capture_thread.is_alive():
                     print("TargetShooter: Capture thread did not join in time.")
-            
+
             self.game_requested_stop = True
 
-            if self.esp32_client:
-                self._run_esp32(self.send_command_to_esp32(INIT_PAN, INIT_TILT, shoot_command=False))
-                print("TargetShooter: Sent home command to ESP32 on stop.")
-            
-            print("TargetShooter: Stop sequence complete.")
-        else:
-            print("TargetShooter: Stop already in progress or completed.")
+            self.send_to_arduino(INIT_PAN, INIT_TILT)
+            print("TargetShooter: Sent home command to ESP32 on stop.")
+
+
+
+        else:            print("TargetShooter: Stop sequence complete.")
+

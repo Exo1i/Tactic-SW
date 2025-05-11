@@ -6,8 +6,10 @@ import sys
 import os
 import json
 import inspect
-import serial  # Added for serial connection
 import asyncio
+from starlette.websockets import WebSocketState
+import cv2
+import numpy as np
 
 # Import memory matching backend for color/yolo WebSocket endpoints
 from games.rubiks_cube_game import RubiksCubeGame
@@ -61,14 +63,67 @@ memory_game_instances = {
 
 @app.get("/stream/target-shooter")
 async def stream_target_shooter(request: Request):
+    global target_shooter_session
+    
+    print(f"Stream requested from {request.client.host if request.client else 'Unknown'}. Session exists: {target_shooter_session is not None}")
+    
     if not target_shooter_session:
-        # Optionally, you could auto-create a session here, but better to require WS first
+        print("No target shooter session available for streaming. Sending placeholder stream.")
+        
+        async def empty_stream_generator():
+            boundary_str = "frame"
+            boundary = b"--" + boundary_str.encode()
+            boundary_end = b"--" + boundary_str.encode() + b"--\r\n"
+            content_type_header = b"Content-Type: image/jpeg\r\n"
+            crlf = b"\r\n"
+
+            img = np.zeros((480, 640, 3), dtype=np.uint8) 
+            cv2.putText(img, "No active game session", (100, 230), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 100, 100), 2)
+            cv2.putText(img, "Start a game to see the feed.", (100, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+            ret_val, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            
+            jpg_bytes_empty = b''
+            if ret_val:
+                jpg_bytes_empty = buffer.tobytes()
+            else:
+                print("Empty stream generator: Failed to encode placeholder frame.")
+
+            for _ in range(3): 
+                yield boundary + crlf
+                yield content_type_header
+                yield f"Content-Length: {len(jpg_bytes_empty)}\r\n".encode()
+                yield crlf
+                yield jpg_bytes_empty
+                yield crlf
+                await asyncio.sleep(0.5) 
+            yield boundary_end
+        
         return StreamingResponse(
-            iter([b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"]),  # empty stream
-            media_type="multipart/x-mixed-replace; boundary=frame"
+            empty_stream_generator(),
+            media_type=f"multipart/x-mixed-replace; boundary=frame", # Boundary here must match the one used in generator
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "Connection": "close", # Close after sending placeholders
+                "Access-Control-Allow-Origin": "*" 
+            }
         )
+    
+    print(f"Returning target shooter stream generator for client {request.client.host if request.client else 'Unknown'}")
     generator = target_shooter_session.get_stream_generator()
-    return StreamingResponse(generator, media_type="multipart/x-mixed-replace; boundary=frame")
+    
+    return StreamingResponse(
+        generator, 
+        media_type=f"multipart/x-mixed-replace; boundary=frame", # Boundary here must match
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Connection": "keep-alive", # Keep alive for the actual game stream
+            "Access-Control-Allow-Origin": "*"
+        }
+    )
 
 @app.get("/stream/shell-game")
 async def stream_shell_game(request: Request):
@@ -176,7 +231,19 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
 
         # Special handling for Target Shooter: store singleton for streaming
         if game_id == "target-shooter":
+            # First store the session globally so streaming endpoint can access it
+            print(f"Setting global target_shooter_session before game loop")
             target_shooter_session = game_session
+            
+            # Then start the game loop
+            if hasattr(game_session, "manage_game_loop"):
+                print(f"Starting manage_game_loop for {game_id}")
+                try:
+                    await game_session.manage_game_loop(websocket)
+                    print(f"Game loop ended normally for {game_id}")
+                    return
+                except Exception as e:
+                    print(f"Error in game loop for {game_id}: {e}")
 
     except Exception as e:
         await websocket.send_json({"status": "error", "message": f"Failed to load or initialize game: {str(e)}"})
@@ -187,6 +254,10 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
     # TargetShooter and MemoryMatching (color/yolo) will have returned by now.
     try:
         while True:
+            if websocket.application_state == WebSocketState.DISCONNECTED:
+                print(f"WebSocket disconnected for game_id: {game_id}")
+                break
+
             data = await websocket.receive()
             result = None
             try:

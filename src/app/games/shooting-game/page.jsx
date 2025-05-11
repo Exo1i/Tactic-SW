@@ -6,8 +6,8 @@ const ShootingGamePage = () => {
   const [offsetX, setOffsetX] = useState(4); 
   const [offsetY, setOffsetY] = useState(18); 
   const [focalLength, setFocalLength] = useState(580); 
-  const [targetColor, setTargetColor] = useState('yellow');
-  const [noBalloonTimeout, setNoBalloonTimeout] = useState(10); 
+  const [targetColor, setTargetColor] = useState('red');
+  const [noBalloonTimeout, setNoBalloonTimeout] = useState(1000); // Changed default to 10 seconds
   const [ws, setWs] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [gameState, setGameState] = useState(null);
@@ -45,8 +45,11 @@ const ShootingGamePage = () => {
         if (data.status === 'ended') {
           setStatusMessage(`Game Ended: ${data.message}`);
           setIsGameRunning(false);
+          setStreamUrl(null); // Clear stream URL when game ends
         } else if (data.status === 'ok' || data.status === 'command_processed') {
-            if (!isGameRunning) setIsGameRunning(true);
+            if (isGameRunning && data.message) {
+                // Example: setStatusMessage(data.message);
+            }
         }
       } catch (error) {
         console.error('Error processing message from backend:', error);
@@ -93,7 +96,13 @@ const ShootingGamePage = () => {
         socket.send(JSON.stringify(initialConfig));
         setStatusMessage('Configuration sent. Backend will start streaming frames.');
         setIsGameRunning(true);
-        setStreamUrl(`${backendHttpUrl}/stream/target-shooter?${Date.now()}`);
+        
+        // Add a timestamp and random number to force reload and avoid caching
+        const timestamp = Date.now();
+        const random = Math.floor(Math.random() * 10000);
+        setStreamUrl(`${backendHttpUrl}/stream/target-shooter?t=${timestamp}&r=${random}`);
+        
+        console.log(`Stream URL set to: ${backendHttpUrl}/stream/target-shooter?t=${timestamp}&r=${random}`);
       } else if (socket.readyState === WebSocket.CONNECTING) {
         console.log("WebSocket is connecting, waiting to send config...");
         setTimeout(() => sendConfigWhenReady(socket), 200);
@@ -129,6 +138,17 @@ const ShootingGamePage = () => {
     setIsGameRunning(false);
     setStreamUrl(null);
   };
+
+  const handleReloadStream = useCallback(() => {
+    if (isGameRunning) {
+      const timestamp = Date.now();
+      const random = Math.floor(Math.random() * 10000);
+      const newStreamUrl = `${backendHttpUrl}/stream/target-shooter?t=${timestamp}&r=${random}`;
+      console.log(`Reloading stream with new URL: ${newStreamUrl}`);
+      setStreamUrl(newStreamUrl);
+      setStatusMessage("Attempting to reload stream...");
+    }
+  }, [isGameRunning, backendHttpUrl]);
 
   useEffect(() => {
     return () => {
@@ -182,12 +202,25 @@ const ShootingGamePage = () => {
         <div className={styles.videoFeed}>
           <h2>Processed Feed from Backend</h2>
           {isGameRunning && streamUrl ? (
-            <img
-              src={streamUrl}
-              alt="Processed MJPEG stream"
-              className={styles.videoElement}
-              style={{ background: "#222" }}
-            />
+            <React.Fragment>
+              <img
+                src={streamUrl}
+                alt="Processed MJPEG stream"
+                className={styles.videoElement}
+                style={{ background: "#222" }}
+                onLoad={() => {
+                  console.log("Stream loaded successfully.");
+                }}
+                onError={(e) => {
+                  console.error("Error loading stream:", e);
+                  setStatusMessage("Error loading video stream. Attempting to reload...");
+                  setTimeout(handleReloadStream, 3000);
+                }}
+              />
+              <p style={{fontSize: '0.8rem', color: '#666'}}>
+                Stream URL: {streamUrl.split('?')[0]}
+              </p>
+            </React.Fragment>
           ) : (
             <div className={styles.noFramePlaceholder}>
               {isGameRunning ? "Waiting for processed frame..." : "Game not started or no feed."}
