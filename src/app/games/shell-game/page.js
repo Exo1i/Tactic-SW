@@ -16,12 +16,12 @@ export default function ShellGamePage() {
   const [processedFrame, setProcessedFrame] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [cameraSettings, setCameraSettings] = useState({
-    useIpCamera: false,
-    ipCameraAddress: "",
+    useIpCamera: typeof window !== "undefined" && !!localStorage.getItem("ipCameraAddress"),
+    ipCameraAddress: typeof window !== "undefined" ? localStorage.getItem("ipCameraAddress") || "" : "",
   });
   const [appliedCameraSettings, setAppliedCameraSettings] = useState({
-    useIpCamera: false,
-    ipCameraAddress: "",
+    useIpCamera: typeof window !== "undefined" && !!localStorage.getItem("ipCameraAddress"),
+    ipCameraAddress: typeof window !== "undefined" ? localStorage.getItem("ipCameraAddress") || "" : "",
   });
 
   // Loading indicators

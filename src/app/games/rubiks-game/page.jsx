@@ -7,21 +7,21 @@ const COLOR_NAMES = ["W", "R", "G", "Y", "O", "B"];
 // **DEBUG** Counter for frames sent
 let frameSentCounter = 0;
 
+const getDefaultIpCameraUrl = () => {
+  if (typeof window !== "undefined" && window.localStorage) {
+    return localStorage.getItem("ipCameraAddress") || "";
+  }
+  return "";
+};
+const getDefaultUseIpCamera = () => {
+  if (typeof window !== "undefined" && window.localStorage) {
+    return !!localStorage.getItem("ipCameraAddress");
+  }
+  return false;
+};
+
 export default function RubiksSolverPage() {
   console.log("[Render] RubiksSolverPage component rendering"); // **DEBUG**
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const wsRef = useRef(null);
-  const ipCamImgRef = useRef(null);
-
-  const [status, setStatus] = useState({
-    mode: "connecting",
-    status_message: "Connecting to backend...",
-    error_message: null,
-    solution: null,
-    serial_connected: false,
-    calibration_step: null,
-    current_color: null,
     scan_index: null,
     solve_move_index: null,
     total_solve_moves: null,

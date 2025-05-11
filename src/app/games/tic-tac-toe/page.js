@@ -17,12 +17,12 @@ export default function TicTacToePage() {
   const [birdViewFrame, setBirdViewFrame] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [cameraSettings, setCameraSettings] = useState({
-    useIpCamera: false,
-    ipCameraAddress: "",
+    useIpCamera: typeof window !== "undefined" && !!localStorage.getItem("ipCameraAddress"),
+    ipCameraAddress: typeof window !== "undefined" ? localStorage.getItem("ipCameraAddress") || "" : "",
   });
   const [appliedCameraSettings, setAppliedCameraSettings] = useState({
-    useIpCamera: false,
-    ipCameraAddress: "",
+    useIpCamera: typeof window !== "undefined" && !!localStorage.getItem("ipCameraAddress"),
+    ipCameraAddress: typeof window !== "undefined" ? localStorage.getItem("ipCameraAddress") || "" : "",
   });
 
   // Tic Tac Toe arguments
