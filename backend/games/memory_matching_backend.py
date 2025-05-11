@@ -21,7 +21,7 @@ from utils.esp32_client import esp32_client as global_esp32_client_instance
 
 # --- Configuration ---
 # SERIAL_PORT and BAUD_RATE are no longer needed
-CAMERA_URL = 'http://192.168.2.19:4747/video' # Primary Camera URL
+CAMERA_URL = 'http://192.168.49.249:4747/video' # Primary Camera URL
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -369,9 +369,9 @@ async def load_yolo_model_on_startup():
             logging.error("Ultralytics library not found. YOLO mode unavailable.")
             yolo_model_global = None; return
         from ultralytics import YOLO
-        if not os.path.exists(YOLO_MODEL_PATH):
-            logging.error(f"YOLO model file not found: {YOLO_MODEL_PATH}. YOLO mode unavailable.")
-            yolo_model_global = None; return
+        # if not os.path.exists(YOLO_MODEL_PATH):
+        #     logging.error(f"YOLO model file not found: {YOLO_MODEL_PATH}. YOLO mode unavailable.")
+        #     yolo_model_global = None; return
         logging.info(f"Loading YOLO model globally from: {YOLO_MODEL_PATH}")
         yolo_model_global = YOLO(YOLO_MODEL_PATH)
         logging.info("Warming up YOLO model...")
