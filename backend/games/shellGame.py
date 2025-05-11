@@ -309,7 +309,7 @@ class ShellGame:
                 cv2.putText(frame, f"{name} (Ball!)", (center[0] - 60, center[1] - max(axes) - 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 cv2.ellipse(frame, center, axes, 0, 0, 360, (0, 255, 255), 3)
-                print(name)  # <-- Print the cup name to the terminal
+                # print(name)  # <-- Print the cup name to the terminal
 
         if success and not self.game_paused:
             ball_under_cup_idx = self.check_ball_under_cup(ball_position, cup_ellipses)
@@ -323,16 +323,17 @@ class ShellGame:
                 self.last_wanted_cup_idx = self.last_moved_cup_idx
 
         # --- SERIAL ARM CONTROL LOGIC (after game ends) ---
+        cup_name_result = None  # <--- Add this
         if self.game_ended and not self.arm_command_sent:
             cup_positions = []
             for i, (x, y, w, h) in enumerate(boxes):
                 center_x = int(x + w/2)
                 cup_positions.append((center_x, i))
             cup_positions_sorted = sorted(cup_positions, key=lambda tup: tup[0])
-            cup_names = ["Left Cup", "Middle Cup", "Right Cup"]
-            cup_idx_to_name = {}
+            cup_names_full = ["Left Cup", "Middle Cup", "Right Cup"]
+            cup_idx_to_name_full = {}
             for idx, (_, i) in enumerate(cup_positions_sorted):
-                cup_idx_to_name[i] = cup_names[idx]
+                cup_idx_to_name_full[i] = cup_names_full[idx]
             idx_to_lr = {i: lr for lr, (_, i) in enumerate(cup_positions_sorted)}
 
             detected_cup_idx = None
@@ -343,6 +344,7 @@ class ShellGame:
 
             if detected_cup_idx is not None:
                 wantedCup = idx_to_lr.get(detected_cup_idx, -1)
+                cup_name_result = cup_names[wantedCup] if wantedCup in [0, 1, 2] else None
             else:
                 wantedCup = -1
 
@@ -391,6 +393,8 @@ class ShellGame:
             "cups": [dict(center=ellipse[0], axes=ellipse[1], angle=ellipse[2]) for ellipse in cup_ellipses],
             "raw_frame": raw_b64,
             "processed_frame": processed_b64,
+            # --- Add cup_name_result to debug/game state ---
+            "cup_name_result": cup_name_result if self.game_ended else None,
         }
         return resp
 
@@ -416,15 +420,39 @@ class ShellGame:
         await client.send_command("180,90,0,0")
         await asyncio.sleep(2.0)
 
+    async def send_livefeed_ws(self, websocket):
+        """
+        Continuously send the latest raw camera frame as a base64 string via WebSocket.
+        """
+        while not self.stopped:
+            try:
+                frame = self.get_ipcam_frame()
+                if frame is not None:
+                    frame = cv2.resize(frame, (640, 480))
+                    _, raw_jpg = cv2.imencode('.jpg', frame)
+                    raw_b64 = base64.b64encode(raw_jpg).decode("utf-8")
+                    await websocket.send_json({"type": "livefeed", "payload": raw_b64})
+                await asyncio.sleep(0.05)  # ~20 FPS
+            except Exception as e:
+                print(f"ShellGame livefeed WS error: {e}")
+                break
+        print("ShellGame livefeed WS loop exiting.")
+
     def get_stream_generator(self):
         """
         Yields multipart JPEG frames for HTTP streaming.
+        Each time the frontend requests a frame (i.e., the MJPEG stream is open),
+        this method grabs a fresh frame from the camera, processes it, and yields the result.
+        Additionally, exposes debug/game state via a parallel HTTP endpoint.
         """
         boundary = "frame"
         while not self.stopped:
             try:
-                b64_frame = self.frame_queue.get(timeout=2)
-                jpg_bytes = base64.b64decode(b64_frame)
+                result = self.process_frame()
+                processed_b64 = result.get("processed_frame")
+                if not processed_b64:
+                    continue
+                jpg_bytes = base64.b64decode(processed_b64)
                 yield (
                     b"--%b\r\n"
                     b"Content-Type: image/jpeg\r\n"
@@ -432,13 +460,32 @@ class ShellGame:
                 )
                 yield jpg_bytes
                 yield b"\r\n"
-            except queue.Empty:
-                continue
+                # Store latest debug/game state for a parallel endpoint
+                self.latest_debug_state = {k: v for k, v in result.items() if k != "processed_frame"}
             except Exception as e:
                 print(f"ShellGame stream generator error: {e}")
                 break
         print("ShellGame stream generator exiting.")
 
+    def get_latest_debug_state(self):
+        """Return the latest debug/game state (excluding processed_frame)."""
+        return getattr(self, "latest_debug_state", {})
+
     def __del__(self):
         self.stop()
+
+# process_frame is called by the backend only when a frame is received via WebSocket (as bytes).
+# In your current setup, the backend now controls the camera and does NOT expect frames from the frontend.
+# Instead, process_frame is called internally by the backend to process the latest camera frame
+# (for HTTP streaming and for the processed_frame in the WebSocket livefeed fallback).
+
+# In the current architecture:
+# - process_frame is called:
+#     - in get_stream_generator() (for MJPEG HTTP streaming)
+#     - in send_livefeed_ws() (if no new frame is in the queue)
+# - It is NOT called in response to frontend WebSocket frame uploads anymore,
+#   because the backend is now responsible for grabbing frames from the camera directly.
+
+# If you want to trigger process_frame on demand (e.g., for a command or API), you can call it directly.
+# But with backend-controlled camera, process_frame is used internally for streaming and livefeed, not via WS uploads.
 
