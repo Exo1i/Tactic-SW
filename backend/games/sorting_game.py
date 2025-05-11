@@ -46,10 +46,10 @@ class GameSession:
         self.arm_positions = {
             (0, 0): [150, 150, 170], (0, 1): [140, 120, 165], 
             (0, 2): [125, 90, 155], (0, 3): [125, 60, 155],
-            (1, 0): [90, 150, 130], (1, 1): [90, 120, 130], 
-            (1, 2): [80, 90, 125], (1, 3): [80, 60, 125]
+            (1, 0): [150,55,155], (1, 1): [130,80,140], 
+            (1, 2): [130,105,140], (1, 3): [150,125,155]
         }
-        self.ARM_HOME = [180, 90, 0]
+        self.ARM_HOME = [180, 0, 0]
         
         # Enable/pickup signals
         self.ENABLE_ACTIVE = 1
@@ -101,6 +101,8 @@ class GameSession:
             command = f"{s1},{s2},{s3},{enable},{pickup}"
             logger.info(f"Sending command: {command}") # Logs the "arm values" sent
             
+            # This is where the command, including angles, is packaged into a JSON
+            # and sent via the esp32_client instance.
             await self.esp32_client.send_json({
                 "action": "command",
                 "command": command
@@ -128,7 +130,7 @@ class GameSession:
         home_angles = self.ARM_HOME
         
         # Define temporary position for storing the first piece during swap
-        temp_position = [90, 10, 120]  # Similar to arm_temp1 in TestDetection.py
+        temp_position = [90, 0, 120]  # Similar to arm_temp1 in TestDetection.py
         
         # Debug logs for arm positions
         logger.info(f"[ARM DEBUG] Source position {from_pos}: {from_angles}")
@@ -442,6 +444,36 @@ class GameSession:
         """Stop the game processing."""
         self.running = False
     
+    def get_next_swap_arm_values(self):
+        """Return the arm values (angles and signals) for the next swap, or None if no swap."""
+        if not self.required_swaps:
+            return None
+        from_pos, to_pos = self.required_swaps[0]
+        # Angles for the swap sequence (from_pos, to_pos, temp, home)
+        from_angles = self.arm_positions[from_pos]
+        to_angles = self.arm_positions[to_pos]
+        home_angles = self.ARM_HOME
+        temp_position = [90, 10, 120]
+        # The full sequence as a list of dicts (step, angles, enable, pickup)
+        sequence = [
+            # Step 1: from_pos -> temp
+            {"desc": "Pick from source", "angles": from_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Move to temp and release", "angles": temp_position, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": "Return to home empty", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+            # Step 2: to_pos -> from_pos
+            {"desc": "Pick from destination", "angles": to_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Move to source and release", "angles": from_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": "Return to home empty", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+            # Step 3: temp -> to_pos
+            {"desc": "Pick from temp", "angles": temp_position, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Move to destination and release", "angles": to_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": "Final return to home", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
+        ]
+        return sequence
+
     async def process_frame(self, frame_bytes):
         """Process a frame to detect the board, shapes, and determine necessary moves."""
         # Send the switch command on the first frame if not sent already
@@ -552,7 +584,8 @@ class GameSession:
                 "required_swaps": self.required_swaps,  # Keep for debugging
                 "total_swaps": len(self.required_swaps),
                 "next_swap": self.required_swaps[0] if self.required_swaps else None,
-                "current_move": self.current_move
+                "current_move": self.current_move,
+                "next_swap_arm_values": self.get_next_swap_arm_values(),  # <--- NEW FIELD
             }
             
             return response
@@ -678,7 +711,8 @@ class GameSession:
                     "required_swaps": self.required_swaps,
                     "total_swaps": len(self.required_swaps),
                     "next_swap": self.required_swaps[0] if self.required_swaps else None,
-                    "current_move": self.current_move
+                    "current_move": self.current_move,
+                    "next_swap_arm_values": self.get_next_swap_arm_values(),  # <--- NEW FIELD
                 }
             
             else:
