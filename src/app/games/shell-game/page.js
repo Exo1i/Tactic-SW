@@ -41,6 +41,12 @@ export default function ShellGamePage() {
   const [cupResult, setCupResult] = useState(null);
 
   useEffect(() => {
+    if (showSettings && cameraSettings.useIpCamera && ipInputRef.current) {
+      ipInputRef.current.focus();
+    }
+  }, [showSettings, cameraSettings.useIpCamera]);
+
+  useEffect(() => {
     if (!isGameStarted) return;
 
     const ws = new WebSocket(`ws://localhost:8000/ws/${gameId}`);
