@@ -7,8 +7,6 @@ import threading
 import asyncio
 # import serial  # REMOVE: No longer needed
 
-from utils.esp32_client import esp32_client  # ADD: Use shared ESP32 client
-
 # --- Threaded VideoStream class (copied from target_shooter_game) ---
 class VideoStream:
     def __init__(self, src):
@@ -36,15 +34,18 @@ class VideoStream:
         self.cap.release()
 
 # --- Hardcoded IP camera URL ---
-IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
+IPCAM_URL = "http://192.168.137.6:8080/video"  # <-- Change to your webcam's IP
 
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
 green_upper = np.array([90, 255, 255])
 
-# Define color range for the light blue ball (replace red)
-ball_lower = np.array([85, 80, 120])    # Lower HSV for light blue
-ball_upper = np.array([105, 255, 255])  # Upper HSV for light blue
+# --- Ball color: restricted red, avoid hand detection ---
+# Red in HSV wraps around, so use two ranges
+ball_lower1 = np.array([0, 140, 120])    # Lower HSV for red (low hue, high S/V)
+ball_upper1 = np.array([10, 255, 255])
+ball_lower2 = np.array([170, 140, 120])  # Upper HSV for red (high hue, high S/V)
+ball_upper2 = np.array([180, 255, 255])
 
 adaptive_green_threshold_low = 80
 adaptive_learning_rate = 0.01
@@ -85,7 +86,7 @@ class ShellGame:
         self.last_motion_times = [time.time(), time.time(), time.time()]
         self.last_cup_centers = [None, None, None]
         self.motion_threshold = 10
-        self.motion_timeout = 10
+        self.motion_timeout = 10  # seconds before game ends due to inactivity
         self.game_paused = False
         self.missing_cup_index = None
         self.game_ended = False
@@ -97,7 +98,44 @@ class ShellGame:
         self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
         self.arm_command_sent = False
         self.last_sent_cup = None
+        self.switch_command_sent = False  # Add flag to track if switch command was sent
+        self.pending_arm_sequence = None  # Store pending arm sequence
         time.sleep(1)  # Give the IP camera time to initialize
+
+        # Schedule the switch command task during initialization
+        if self.esp32_client is not None:
+            try:
+                # Try to get a running event loop or create one if needed
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    # No running event loop, create a new one
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                # Schedule the switch command
+                loop.create_task(self._send_switch_command())
+                print("[ESP32] Scheduled switch command during initialization")
+            except Exception as e:
+                print(f"[ESP32] Failed to schedule switch command: {e}")
+
+    async def _send_switch_command(self):
+        """Send a switch command to ESP32 to activate ARM mode"""
+        if self.esp32_client is None:
+            print("[ESP32] No ESP32 client available, skipping switch command")
+            return False
+            
+        try:
+            print("[ESP32] Sending switch command to activate ARM mode")
+            await self.esp32_client.send_json({
+                "action": "switch",
+                "game": "ARM"
+            })
+            self.switch_command_sent = True
+            return True
+        except Exception as e:
+            print(f"[ESP32] Error sending switch command: {e}")
+            return False
 
     def stop(self):
         """Explicitly stop and release the camera."""
@@ -146,16 +184,39 @@ class ShellGame:
 
     def detect_ball(self, frame):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, ball_lower, ball_upper)
+        # Red mask (combine two ranges)
+        mask1 = cv2.inRange(hsv, ball_lower1, ball_upper1)
+        mask2 = cv2.inRange(hsv, ball_lower2, ball_upper2)
+        mask = cv2.bitwise_or(mask1, mask2)
+        # Morphological filtering to reduce noise (remove hand blobs)
         mask = cv2.erode(mask, None, iterations=2)
-        mask = cv2.dilate(mask, None, iterations=2)
+        mask = cv2.dilate(mask, None, iterations=4)
+        # Find contours and filter by area/circularity
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest_contour = max(contours, key=cv2.contourArea)
-            ((x, y), radius) = cv2.minEnclosingCircle(largest_contour)
-            if radius > 5:
-                return (int(x), int(y))
-        return None
+        best_circle = None
+        best_score = 0
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 100 or area > 2500:
+                continue  # Ignore too small/large (likely not the ball or hand)
+            ((x, y), radius) = cv2.minEnclosingCircle(contour)
+            if radius < 8 or radius > 40:
+                continue  # Ignore unlikely radii
+            # Circularity check
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter == 0:
+                continue
+            circularity = 4 * np.pi * (area / (perimeter * perimeter))
+            if circularity < 0.7:
+                continue  # Not round enough
+            # Optionally: restrict to lower part of frame (if ball is always on table)
+            # if y < frame.shape[0] * 0.3:
+            #     continue
+            # Pick the most circular/likely candidate
+            if circularity > best_score:
+                best_score = circularity
+                best_circle = (int(x), int(y))
+        return best_circle
 
     def check_ball_under_cup(self, ball_pos, cup_ellipses):
         if not hasattr(self, "last_ball_visible"):
@@ -286,6 +347,7 @@ class ShellGame:
                 if dist > self.motion_threshold:
                     self.last_motion_times[i] = time.time()
                     self.last_moved_cup_idx = i
+                    print(f"Cup {i} moved! Distance: {dist:.2f}px")
             self.last_cup_centers[i] = center
             if not self.game_ended:
                 cv2.ellipse(frame, center, axes, 0, 0, 360, (255, 0, 255), 2)
@@ -311,7 +373,20 @@ class ShellGame:
 
         if success and not self.game_paused and not self.game_ended:
             now = time.time()
-            if all(now - t > self.motion_timeout for t in self.last_motion_times):
+            time_since_last_motion = [now - t for t in self.last_motion_times]
+            
+            # Add debug info to frame
+            for i, elapsed in enumerate(time_since_last_motion):
+                cup_label = f"Cup {i}: {elapsed:.1f}s"
+                cv2.putText(frame, cup_label, (10, 30 + i * 20), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Check if all cups haven't moved for longer than the timeout
+            if all(elapsed > self.motion_timeout for elapsed in time_since_last_motion):
+                print(f"Game ended: No cup has moved for {self.motion_timeout} seconds")
+                for i, elapsed in enumerate(time_since_last_motion):
+                    print(f"  Cup {i} last moved {elapsed:.2f} seconds ago")
+                
                 self.game_ended = True
                 self.last_wanted_cup_idx = self.last_moved_cup_idx
 
@@ -344,21 +419,21 @@ class ShellGame:
             if wantedCup in [0, 1, 2]:
                 # Define positions for each cup
                 if wantedCup == 0:
-                    cup_pos = "150,140,155"
-                    lift_pos = "150,140,80"
+                    cup_pos = "170,135,130"
+                    lift_pos = "170,135,80"
                 elif wantedCup == 1:
-                    cup_pos = "105,85,130"
-                    lift_pos = "145,85,90"
+                    cup_pos = "150,90,110"
+                    lift_pos = "180,90,80"
                 elif wantedCup == 2:
-                    cup_pos = "150,35,155"
-                    lift_pos = "150,35,100"
+                    cup_pos = "170,50,130"
+                    lift_pos = "170,50,80"
                 else:
                     cup_pos = None
                     lift_pos = None
 
                 if cup_pos and lift_pos:
-                    # ARM CONTROL: Use esp32_client instead of serial, run async in background
-                    asyncio.create_task(self.send_arm_sequence(cup_pos, lift_pos))
+                    # Store the arm sequence coroutine instead of creating a task directly
+                    self.pending_arm_sequence = (cup_pos, lift_pos)
                     self.arm_command_sent = True
                     self.last_sent_cup = wantedCup
 
@@ -399,18 +474,40 @@ class ShellGame:
         if not client or not client.connected:
             print("ESP32 client not connected, cannot send arm commands.")
             return
-        await client.send_command(f"{cup_pos},0")
+        # Send properly formatted JSON commands instead of raw strings
+        await client.send_json({
+            "action": "command",
+            "command": f"{cup_pos},0,0"
+        })
         await asyncio.sleep(2.0)
-        await client.send_command(f"{cup_pos},1")
+        await client.send_json({
+            "action": "command",
+            "command": f"{cup_pos},1,0"
+        })
         await asyncio.sleep(2.0)
-        await client.send_command(f"{lift_pos},1")
+        await client.send_json({
+            "action": "command", 
+            "command": f"{lift_pos},1,0"
+        })
         await asyncio.sleep(2.0)
-        await client.send_command(f"{cup_pos},1")
+        await client.send_json({
+            "action": "command",
+            "command": f"{cup_pos},1,0"
+        })
         await asyncio.sleep(2.0)
-        await client.send_command(f"{cup_pos},0")
+        await client.send_json({
+            "action": "command",
+            "command": f"{cup_pos},0,0"
+        })
         await asyncio.sleep(2.0)
-        await client.send_command(f"{lift_pos},0")
-        await client.send_command("180,90,0,0")
+        await client.send_json({
+            "action": "command",
+            "command": f"{lift_pos},0,0"
+        })
+        await client.send_json({
+            "action": "command",
+            "command": "180,0,0,0,0"
+        })
         await asyncio.sleep(2.0)
 
     async def send_livefeed_ws(self, websocket):
@@ -443,8 +540,30 @@ class ShellGame:
             try:
                 result = self.process_frame()
                 processed_b64 = result.get("processed_frame")
+                
+                # Check if there's a pending arm sequence to execute
+                if self.pending_arm_sequence:
+                    cup_pos, lift_pos = self.pending_arm_sequence
+                    self.pending_arm_sequence = None
+                    
+                    # Run the arm sequence in a separate thread to avoid blocking the generator
+                    loop = asyncio.new_event_loop()
+                    
+                    def run_arm_sequence():
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(self.send_arm_sequence(cup_pos, lift_pos))
+                        except Exception as e:
+                            print(f"Error executing arm sequence: {e}")
+                        finally:
+                            loop.close()
+                    
+                    # Start the arm sequence in a separate thread
+                    threading.Thread(target=run_arm_sequence, daemon=True).start()
+                    
                 if not processed_b64:
                     continue
+                    
                 jpg_bytes = base64.b64decode(processed_b64)
                 yield (
                     b"--%b\r\n"
@@ -453,6 +572,7 @@ class ShellGame:
                 )
                 yield jpg_bytes
                 yield b"\r\n"
+                
                 # Store latest debug/game state for a parallel endpoint
                 self.latest_debug_state = {k: v for k, v in result.items() if k != "processed_frame"}
             except Exception as e:
@@ -467,18 +587,11 @@ class ShellGame:
     def __del__(self):
         self.stop()
 
-# process_frame is called by the backend only when a frame is received via WebSocket (as bytes).
-# In your current setup, the backend now controls the camera and does NOT expect frames from the frontend.
-# Instead, process_frame is called internally by the backend to process the latest camera frame
-# (for HTTP streaming and for the processed_frame in the WebSocket livefeed fallback).
-
-# In the current architecture:
-# - process_frame is called:
-#     - in get_stream_generator() (for MJPEG HTTP streaming)
-#     - in send_livefeed_ws() (if no new frame is in the queue)
-# - It is NOT called in response to frontend WebSocket frame uploads anymore,
-#   because the backend is now responsible for grabbing frames from the camera directly.
-
-# If you want to trigger process_frame on demand (e.g., for a command or API), you can call it directly.
-# But with backend-controlled camera, process_frame is used internally for streaming and livefeed, not via WS uploads.
-
+# Add this function to handle running a coroutine in a thread
+def run_async_in_thread(coroutine):
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coroutine)
+    finally:
+        loop.close()
