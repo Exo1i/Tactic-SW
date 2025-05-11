@@ -36,7 +36,7 @@ class VideoStream:
         self.cap.release()
 
 # --- Hardcoded IP camera URL ---
-IPCAM_URL = "http://192.168.41.139:4747/video"  # <-- Change to your webcam's IP
+IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
 
 # Define flexible color range for green cups in HSV (for black background)
 green_lower = np.array([30, 40, 80])
@@ -48,9 +48,6 @@ ball_upper = np.array([105, 255, 255])  # Upper HSV for light blue
 
 adaptive_green_threshold_low = 80
 adaptive_learning_rate = 0.01
-
-# REMOVE: Serial initialization
-# esp32_serial = serial.Serial('COM3', 9600, timeout=1)  # Change port if needed
 
 def update_green_threshold(frame):
     global adaptive_green_threshold_low
