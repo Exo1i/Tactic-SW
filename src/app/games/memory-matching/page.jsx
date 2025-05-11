@@ -72,7 +72,7 @@ export default function MemoryGame() {
 
         // Adjust protocol and hostname/port as needed
         const wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-        const wsUrl = `${wsProtocol}${window.location.hostname}:8000/ws/memory-matching`; // Use centralized endpoint
+        const wsUrl = `${wsProtocol}${window.location.hostname}:8000/ws/${version}`; // Use centralized endpoint
         console.log(`Attempting to connect to: ${wsUrl}`);
         websocket.current = new WebSocket(wsUrl);
 
@@ -247,15 +247,15 @@ export default function MemoryGame() {
                 const imageName = objectName.replace(' ', '_');
 
                 cardFaceContent = (<div
-                        className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg text-center p-1 backface-hidden"
-                        style={{backgroundColor: 'white', transform: 'rotateY(180deg)'}}
-                    >
-                        <img
-                            src={`/images/${imageName}.png`}
-                            alt={objectName}
-                            className="max-h-[80%] max-w-[80%] object-contain"
-                        />
-                    </div>);
+                    className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg text-center p-1 backface-hidden"
+                    style={{backgroundColor: 'white', transform: 'rotateY(180deg)'}}
+                >
+                    <img
+                        src={`/images/${imageName}.png`}
+                        alt={objectName}
+                        className="max-h-[80%] max-w-[80%] object-contain"
+                    />
+                </div>);
             } else if (gameVersion === 'color' && cardState?.color) {
                 // For color, just display the color without text
                 colorKey = cardState.color.toLowerCase();
@@ -265,11 +265,11 @@ export default function MemoryGame() {
                 }
 
                 cardFaceContent = (<div
-                        className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg backface-hidden"
-                        style={{...cardFaceBgStyle, transform: 'rotateY(180deg)'}}
-                    >
-                        {/* No text content for color cards */}
-                    </div>);
+                    className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg backface-hidden"
+                    style={{...cardFaceBgStyle, transform: 'rotateY(180deg)'}}
+                >
+                    {/* No text content for color cards */}
+                </div>);
             } else if (cardState?.isFlippedBefore) {
                 // Error state remains the same
                 colorKey = 'detect_fail';
@@ -277,136 +277,137 @@ export default function MemoryGame() {
                 cardFaceBgStyle = {backgroundColor: colorMap[colorKey]};
 
                 cardFaceContent = (<div
-                        className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg text-center p-1 backface-hidden"
-                        style={{...cardFaceBgStyle, transform: 'rotateY(180deg)'}}
-                    >
+                    className="absolute inset-0 w-full h-full flex items-center justify-center rounded-lg text-center p-1 backface-hidden"
+                    style={{...cardFaceBgStyle, transform: 'rotateY(180deg)'}}
+                >
                         <span className="text-xs sm:text-sm md:text-base font-semibold text-gray-800 break-words">
                             Error
                         </span>
-                    </div>);
+                </div>);
             }
         }
 
         // Card container with transition logic
         return (<div key={cardIndex} className="perspective w-full aspect-square">
+            <div
+                className={`relative w-full h-full transition-transform duration-700 ease-in-out preserve-3d ${showFace ? 'rotate-y-180' : ''} ${isMatched ? 'opacity-20 scale-95 pointer-events-none' : ''} ${isCurrentlyFlipped ? 'ring-4 ring-yellow-400 ring-offset-2 scale-105 shadow-xl z-10' : 'shadow-md'}`}
+            >
+                {/* Card Back */}
                 <div
-                    className={`relative w-full h-full transition-transform duration-700 ease-in-out preserve-3d ${showFace ? 'rotate-y-180' : ''} ${isMatched ? 'opacity-20 scale-95 pointer-events-none' : ''} ${isCurrentlyFlipped ? 'ring-4 ring-yellow-400 ring-offset-2 scale-105 shadow-xl z-10' : 'shadow-md'}`}
-                >
-                    {/* Card Back */}
-                    <div
-                        className="absolute inset-0 w-full h-full bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg flex items-center justify-center backface-hidden card-back-content">
-                        {/* Content is handled by ::before pseudo-element in CSS */}
-                    </div>
-                    {/* Card Face (conditionally rendered or always present based on complexity) */}
-                    {cardFaceContent}
+                    className="absolute inset-0 w-full h-full bg-gradient-to-br from-blue-500 to-blue-700 rounded-lg flex items-center justify-center backface-hidden card-back-content">
+                    {/* Content is handled by ::before pseudo-element in CSS */}
                 </div>
-            </div>);
+                {/* Card Face (conditionally rendered or always present based on complexity) */}
+                {cardFaceContent}
+            </div>
+        </div>);
     };
 
 
     // --- JSX Structure ---
-    return (<div className="min-h-screen bg-gray-100 flex flex-col items-center p-4">
-            <h1 className="text-2xl sm:text-3xl font-bold text-gray-800 mb-4">Memory Puzzle Game</h1>
+    return (<div className="min-h-screen bg-gray-900 text-gray-100 flex flex-col items-center p-2 sm:p-4">
+        <h1 className="text-3xl sm:text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500 mb-4 sm:mb-6">Memory Puzzle Game</h1>
 
-            {/* Status Bar */}
-            <div
-                className="w-full max-w-6xl bg-white text-gray-700 p-3 rounded-lg shadow mb-4 text-xs sm:text-sm flex flex-wrap justify-between items-center gap-x-4 gap-y-1">
-                <span>Status:
-                    <span className={`ml-1 font-semibold ${isConnected ? 'text-green-600' : 'text-red-600'}`}>
-                        {isConnected ? 'Connected' : 'Disconnected'}
-                    </span>
-                    {isConnected && gameVersion && ` (${gameVersion})`}
-                 </span>
-                <span className="text-center flex-grow mx-2 truncate font-medium" title={message}>{message}</span>
-                <span>Pairs Found: {gameState?.pairs_found ?? 0} / {CARD_COUNT / 2}</span>
-            </div>
+        <div className="w-full max-w-6xl bg-gray-800 text-gray-300 p-3 rounded-lg shadow-xl mb-4 text-xs sm:text-sm flex flex-wrap justify-between items-center gap-x-4 gap-y-2">
+            <span>Status:
+                <span className={`ml-1 font-semibold ${isConnected ? 'text-green-400' : 'text-red-400'}`}>
+                    {isConnected ? 'Connected' : 'Disconnected'}
+                </span>
+                {isConnected && gameVersion && ` (${gameVersion.charAt(0).toUpperCase() + gameVersion.slice(1)})`}
+             </span>
+             <span className="text-center flex-grow mx-2 truncate font-medium text-gray-100" title={message}>{message}</span>
+             <span>Pairs: <strong className="text-yellow-400">{gameState?.pairs_found ?? 0}</strong> / {CARD_COUNT / 2}</span>
+        </div>
 
-            {/* Error Display */}
-            {showError && (<div
-                    className="w-full max-w-6xl bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded-md shadow mb-4 text-sm"
-                    role="alert">
+        {/* Error Display */}
+        {showError && (
+                <div className="w-full max-w-6xl bg-red-700 border border-red-500 text-red-100 px-4 py-2 rounded-md shadow-lg mb-4 text-sm" role="alert">
                     <strong className="font-bold">Error: </strong>
                     <span className="block sm:inline">{showError}</span>
-                </div>)}
+                </div>
+        )}
 
 
-            {/* Version Selector / Play Again Buttons */}
-            {(!gameVersion || isGameOver) && (<div className="flex flex-wrap justify-center space-x-4 mb-6">
-                    {!isGameOver ? (<>
-                            <button
-                                onClick={() => handleVersionSelect('yolo')}
-                                disabled={isConnected || !!gameVersion}
-                                className="px-5 py-2 bg-indigo-600 text-white rounded-md shadow hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                            >
-                                Start YOLO
-                            </button>
-                            <button
-                                onClick={() => handleVersionSelect('color')}
-                                disabled={isConnected || !!gameVersion}
-                                className="px-5 py-2 bg-teal-600 text-white rounded-md shadow hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-teal-400"
-                            >
-                                Start Color
-                            </button>
-                        </>) : (<button
-                            onClick={handlePlayAgain}
-                            className="px-5 py-2 bg-green-600 text-white rounded-md shadow hover:bg-green-700 transition-colors focus:outline-none focus:ring-2 focus:ring-green-400"
-                        >
-                            Play Again?
-                        </button>)}
-                </div>)}
+        {/* Version Selector / Play Again Buttons */}
+        {(!gameVersion || isGameOver) && (<div className="flex flex-col sm:flex-row items-center justify-center space-y-3 sm:space-y-0 sm:space-x-4 mb-6 p-4 bg-gray-800 rounded-lg shadow-xl">
 
-            {/* Game Area */}
-            {gameVersion && !isGameOver && isConnected && (
-                <div className="flex flex-col lg:flex-row gap-4 w-full max-w-6xl">
+            {!isGameOver ? (<>
+                <button
+                    onClick={() => handleVersionSelect('yolo')}
+                    disabled={isConnected || !!gameVersion}
+                    className="px-6 py-3 text-lg bg-gradient-to-r from-purple-600 to-indigo-600 text-white rounded-md shadow-lg hover:from-purple-700 hover:to-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-opacity-75 w-full sm:w-auto"
+                    >
+                    Start YOLO
+                </button>
+                <button
+                    onClick={() => handleVersionSelect('color')}
+                    disabled={isConnected || !!gameVersion}
+                    className="px-6 py-3 text-lg bg-gradient-to-r from-teal-500 to-cyan-600 text-white rounded-md shadow-lg hover:from-teal-600 hover:to-cyan-700 disabled:opacity-60 disabled:cursor-not-allowed transition-all transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-cyan-400 focus:ring-opacity-75 w-full sm:w-auto"
+                    >
+                    Start Color
+                </button>
+            </>) : (<button
+                onClick={handlePlayAgain}
+                className="px-8 py-4 text-xl bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-md shadow-xl hover:from-green-600 hover:to-emerald-700 transition-all transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-emerald-400 focus:ring-opacity-75"
+                >
+                Play Again?
+            </button>)}
+        </div>)}
 
-                    {/* Left Column: Feeds */}
-                    <div className="flex flex-col gap-4 lg:w-1/2">
-                        {/* Main Camera Feed */}
-                        <div className="bg-white p-3 sm:p-4 rounded-lg shadow">
-                            <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-700">Live Camera</h2>
-                            <div
-                                className="w-full aspect-video bg-gray-200 border border-gray-300 rounded overflow-hidden">
-                                {videoSrc ? (
-                                    <img src={videoSrc} alt="Live feed" className="w-full h-full object-cover" />) : (
-                                    <div className="w-full h-full flex items-center justify-center text-gray-500">
-                                        Waiting for camera...
-                                    </div>)}
-                            </div>
-                        </div>
+        {/* Game Area */}
+        {gameVersion && !isGameOver && isConnected && (
+            <div className="flex flex-col lg:flex-row gap-4 sm:gap-6 w-full max-w-6xl">
 
-                        {/* Transformed Board Feed */}
-                        <div className="bg-white p-3 sm:p-4 rounded-lg shadow">
-                            <h2 className="text-lg sm:text-xl font-semibold mb-2 text-gray-700">Detected Board</h2>
-                            <div
-                                className="w-full bg-gray-200 border border-gray-300 rounded overflow-hidden relative"
-                                style={{paddingTop: `${(BOARD_DETECT_HEIGHT / BOARD_DETECT_WIDTH) * 100}%`}} // Maintain aspect ratio
-                            >
-                                {transformedVideoSrc ? (<img src={transformedVideoSrc} alt="Transformed board"
-                                                             className="absolute inset-0 w-full h-full object-contain" /> // Use object-contain
-                                ) : (<div
-                                        className="absolute inset-0 flex items-center justify-center text-gray-500 text-xs p-2 text-center">
-                                        {videoSrc ? 'Waiting for board detection...' : 'Camera feed needed'}
-                                    </div>)}
-                            </div>
+                {/* Left Column: Feeds */}
+                <div className="flex flex-col gap-4 sm:gap-6 lg:w-1/2">
+                   {/* Main Camera Feed */}
+                   <div className="bg-gray-800 p-3 sm:p-4 rounded-lg shadow-xl border border-gray-700">
+                        <h2 className="text-xl sm:text-2xl font-semibold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-blue-500">Live Camera</h2>
+                        <div
+                             className="w-full aspect-video bg-gray-700 border border-gray-600 rounded overflow-hidden">
+                             {videoSrc ? (
+                                    <img src={videoSrc} alt="Live feed" className="w-full h-full object-cover" />
+                                ) : (
+                                    <div className="w-full h-full flex items-center justify-center text-gray-400">
+                                        {isConnected ? "Waiting for camera..." : "Connecting..."}
+                                    </div>
+                            )}
                         </div>
                     </div>
 
-                    {/* Right Column: Game Board */}
-                    <div className="bg-white p-3 sm:p-4 rounded-lg shadow lg:w-1/2">
-                        <h2 className="text-lg sm:text-xl font-semibold mb-3 text-gray-700">Game Board</h2>
-                        {/* Game Grid */}
-                        <div className={`grid grid-cols-${GRID_COLS} gap-2 md:gap-3 lg:gap-4`}>
-                            {Array.from({length: CARD_COUNT}).map((_, index) => renderCardContent(index))}
+                    {/* Transformed Board Feed */}
+                    <div className="bg-gray-800 p-3 sm:p-4 rounded-lg shadow-xl border border-gray-700">
+                        <h2 className="text-xl sm:text-2xl font-semibold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-lime-400 to-green-500">Detected Board</h2>
+                        <div
+                            className="w-full bg-gray-700 border border-gray-600 rounded overflow-hidden relative"
+                            style={{paddingTop: `${(BOARD_DETECT_HEIGHT / BOARD_DETECT_WIDTH) * 100}%`}} // Maintain aspect ratio
+                    >
+                             {transformedVideoSrc ? (
+                                    <img src={transformedVideoSrc} alt="Transformed board" className="absolute inset-0 w-full h-full object-contain" />
+                                ) : (
+                                    <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-xs p-2 text-center">
+                                        {videoSrc && isConnected ? 'Waiting for board detection...' : (isConnected ? 'Camera feed needed' : 'Connecting...')}
+                                    </div>
+                            )}
                         </div>
                     </div>
-                </div>)}
+                </div>
 
-            {/* Placeholder when not connected or version not selected */}
-            {(!gameVersion || !isConnected) && !isGameOver && (<div className="mt-10 text-gray-500">
-                    Please select a game version to begin.
-                </div>)}
+                {/* Right Column: Game Board */}
+                <div className="bg-gray-800 p-3 sm:p-4 rounded-lg shadow-xl border border-gray-700 lg:w-1/2">
+                    <h2 className="text-xl sm:text-2xl font-semibold mb-3 text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500">Game Board</h2>
+                    <div className={`grid grid-cols-${GRID_COLS} gap-2 sm:gap-3 lg:gap-4`}>
+                        {Array.from({ length: CARD_COUNT }).map((_, index) => renderCardContent(index) )}
+                    </div>
+                </div>
+            </div>)}
 
-        </div>);
+        {/* Placeholder when not connected or version not selected */}
+        {(!gameVersion || !isConnected) && !isGameOver && (<div className="mt-10 text-gray-500">
+            Please select a game version to begin.
+        </div>)}
+
+    </div>);
 }
 
 // Add utility classes for Tailwind JIT (if needed, or rely on safelist in config)

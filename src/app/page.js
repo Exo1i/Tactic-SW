@@ -6,8 +6,7 @@ const games = [
   { name: "Tic Tac Toe", id: "tic-tac-toe" },
   { name: "Rubik's Game", id: "rubiks-game" },
   { name: "Memory Matching", id: "memory-matching" },
-  { name: "Game 4", id: "game-4" },
-  { name: "Game 5", id: "game-5" },
+  { name: "Target Shooter", id: "shooting-game" },
 ];
 
 export default function Home() {
@@ -16,16 +15,21 @@ export default function Home() {
   return (
     <div className="flex flex-col items-center justify-center min-h-screen gap-8">
       <h1 className="text-3xl font-bold mb-4">Choose a Game</h1>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {games.map((game) => (
-          <button
-            key={game.id}
-            className="px-6 py-4 bg-blue-600 text-white rounded shadow hover:bg-blue-700 transition"
-            onClick={() => router.push(`/games/${game.id}`)}
-          >
-            {game.name}
-          </button>
-        ))}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-md">
+        {games.map((game, idx) => {
+          // If odd number of games and this is the last one, center it by spanning two columns
+          
+          return (
+            <button
+              key={game.id}
+              className={`px-6 py-4 bg-blue-600 text-white rounded shadow hover:bg-blue-700 transition
+                  ${idx === games.length - 1 ? "sm:col-span-2 justify-self-center w-full" : ""}`}
+              onClick={() => router.push(`/games/${game.id}`)}
+            >
+              {game.name}
+            </button>
+          );
+        })}
       </div>
     </div>
   );

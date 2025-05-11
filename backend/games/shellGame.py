@@ -2,6 +2,38 @@ import cv2
 import numpy as np
 import base64
 import time
+import queue  # Add for frame streaming
+import threading
+import asyncio
+# import serial  # REMOVE: No longer needed
+
+from utils.esp32_client import esp32_client  # ADD: Use shared ESP32 client
+
+# --- Threaded VideoStream class (copied from target_shooter_game) ---
+class VideoStream:
+    def __init__(self, src):
+        self.cap = cv2.VideoCapture(src)
+        self.ret, self.frame = self.cap.read()
+        self.stopped = False
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+
+    def update(self):
+        while not self.stopped:
+            ret, frame = self.cap.read()
+            with self.lock:
+                self.ret = ret
+                self.frame = frame
+
+    def read(self):
+        with self.lock:
+            return self.ret, self.frame.copy() if self.frame is not None else (False, None)
+
+    def release(self):
+        self.stopped = True
+        self.thread.join()
+        self.cap.release()
 
 # --- Hardcoded IP camera URL ---
 IPCAM_URL = "http://192.168.49.1:4747/video"  # <-- Change to your webcam's IP
@@ -42,8 +74,9 @@ def create_multitracker():
         return cv2.MultiTracker_create()
     raise RuntimeError("MultiTracker not available in your OpenCV installation.")
 
-class GameSession:
-    def __init__(self):
+class ShellGame:
+    def __init__(self, esp32_client=None):
+        self.esp32_client = esp32_client  # Store the ESP32 client if provided
         self.ball_position = None
         self.ball_under_cup = None
         self.last_nearest_cup = None
@@ -60,29 +93,27 @@ class GameSession:
         self.last_moved_cup_idx = None
         self.last_ball_under_cup_idx = None
         self.stopped = False
-        self.cap = cv2.VideoCapture(IPCAM_URL)
+        self.video_stream = VideoStream(IPCAM_URL)
+        self.frame_queue = queue.Queue(maxsize=100)  # For HTTP streaming
+        self.arm_command_sent = False
+        self.last_sent_cup = None
         time.sleep(1)  # Give the IP camera time to initialize
 
     def stop(self):
         """Explicitly stop and release the camera."""
         if not self.stopped:
             self.stopped = True
-            if self.cap is not None:
-                self.cap.release()
-                self.cap = None
+            if self.video_stream is not None:
+                self.video_stream.release()
+                self.video_stream = None
 
     def get_ipcam_frame(self):
         if self.stopped:
             return None
-        if not self.cap or not self.cap.isOpened():
-            # Try to reopen if closed
-            self.cap = cv2.VideoCapture(IPCAM_URL)
-            # time.sleep(1)
-            if not self.cap.isOpened():
-                return None
-        # Flush buffer (optional, for IP cams)
-        for _ in range(2):
-            ret, frame = self.cap.read()
+        if not self.video_stream:
+            self.video_stream = VideoStream(IPCAM_URL)
+            time.sleep(1)
+        ret, frame = self.video_stream.read()
         if not ret or frame is None or frame.size == 0:
             return None
         return frame
@@ -236,6 +267,17 @@ class GameSession:
             cup_ellipses.append((center, axes, angle))
             valid_boxes.append((x, y, w, h))
 
+        # --- Determine cup positions (left/middle/right) ---
+        cup_positions = []
+        for i, (x, y, w, h) in enumerate(valid_boxes):
+            center_x = int(x + w/2)
+            cup_positions.append((center_x, i))
+        cup_positions_sorted = sorted(cup_positions, key=lambda tup: tup[0])
+        cup_names = ["left", "middle", "right"]
+        cup_idx_to_name = {}
+        for idx, (_, i) in enumerate(cup_positions_sorted):
+            cup_idx_to_name[i] = cup_names[idx]
+
         for i, (x, y, w, h) in enumerate(valid_boxes):
             center = (int(x + w/2), int(y + h/2))
             axes = (int(w/2), int(h/2))
@@ -251,17 +293,7 @@ class GameSession:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
         if not self.game_paused and not self.game_ended:
-            cup_positions = []
-            for i, (x, y, w, h) in enumerate(valid_boxes):
-                center_x = int(x + w/2)
-                cup_positions.append((center_x, i))
-            cup_positions_sorted = sorted(cup_positions, key=lambda tup: tup[0])
-            cup_names = ["Left Cup", "Middle Cup", "Right Cup"]
-            cup_idx_to_name = {}
-            for idx, (_, i) in enumerate(cup_positions_sorted):
-                cup_idx_to_name[i] = cup_names[idx]
-
-            current_ball_cup_idx = self.check_ball_under_cup(ball_position, cup_ellipses)
+            current_ball_cup_idx = self.check_ball_under_cup(self.ball_position, cup_ellipses)
             if current_ball_cup_idx is not None:
                 x, y, w, h = [int(v) for v in valid_boxes[current_ball_cup_idx]]
                 center = (int(x + w/2), int(y + h/2))
@@ -270,6 +302,7 @@ class GameSession:
                 cv2.putText(frame, f"{name} (Ball!)", (center[0] - 60, center[1] - max(axes) - 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 cv2.ellipse(frame, center, axes, 0, 0, 360, (0, 255, 255), 3)
+                print(name)  # <-- Print the cup name to the terminal
 
         if success and not self.game_paused:
             ball_under_cup_idx = self.check_ball_under_cup(ball_position, cup_ellipses)
@@ -282,11 +315,67 @@ class GameSession:
                 self.game_ended = True
                 self.last_wanted_cup_idx = self.last_moved_cup_idx
 
+        # --- SERIAL ARM CONTROL LOGIC (after game ends) ---
+        if self.game_ended and not self.arm_command_sent:
+            cup_positions = []
+            for i, (x, y, w, h) in enumerate(boxes):
+                center_x = int(x + w/2)
+                cup_positions.append((center_x, i))
+            cup_positions_sorted = sorted(cup_positions, key=lambda tup: tup[0])
+            cup_names = ["Left Cup", "Middle Cup", "Right Cup"]
+            cup_idx_to_name = {}
+            for idx, (_, i) in enumerate(cup_positions_sorted):
+                cup_idx_to_name[i] = cup_names[idx]
+            idx_to_lr = {i: lr for lr, (_, i) in enumerate(cup_positions_sorted)}
+
+            detected_cup_idx = None
+            if ball_position is None:
+                detected_cup_idx = self.last_ball_under_cup_idx
+            else:
+                detected_cup_idx = self.check_ball_under_cup(ball_position, cup_ellipses)
+
+            if detected_cup_idx is not None:
+                wantedCup = idx_to_lr.get(detected_cup_idx, -1)
+            else:
+                wantedCup = -1
+
+            if wantedCup in [0, 1, 2]:
+                # Define positions for each cup
+                if wantedCup == 0:
+                    cup_pos = "150,140,155"
+                    lift_pos = "150,140,80"
+                elif wantedCup == 1:
+                    cup_pos = "105,85,130"
+                    lift_pos = "145,85,90"
+                elif wantedCup == 2:
+                    cup_pos = "150,35,155"
+                    lift_pos = "150,35,100"
+                else:
+                    cup_pos = None
+                    lift_pos = None
+
+                if cup_pos and lift_pos:
+                    # ARM CONTROL: Use esp32_client instead of serial, run async in background
+                    asyncio.create_task(self.send_arm_sequence(cup_pos, lift_pos))
+                    self.arm_command_sent = True
+                    self.last_sent_cup = wantedCup
+
         # Encode both frames to base64 JPEG
         _, raw_jpg = cv2.imencode('.jpg', raw_frame)
         _, processed_jpg = cv2.imencode('.jpg', frame)
         raw_b64 = base64.b64encode(raw_jpg).decode("utf-8")
         processed_b64 = base64.b64encode(processed_jpg).decode("utf-8")
+
+        # --- STREAM: Put processed frame in queue for HTTP streaming ---
+        try:
+            if self.frame_queue.full():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.frame_queue.put_nowait(processed_b64)
+        except Exception as qerr:
+            print(f"ShellGame frame queue error: {qerr}")
 
         resp = {
             "status": "ok" if not self.game_ended else "ended",
@@ -297,6 +386,51 @@ class GameSession:
             "processed_frame": processed_b64,
         }
         return resp
+
+    async def send_arm_sequence(self, cup_pos, lift_pos):
+        print(cup_pos)
+        print(lift_pos)
+        # Helper to send the arm sequence using esp32_client (async)
+        client = self.esp32_client if self.esp32_client is not None else esp32_client
+        if not client or not client.connected:
+            print("ESP32 client not connected, cannot send arm commands.")
+            return
+        await client.send_command(f"{cup_pos},0")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{cup_pos},1")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{lift_pos},1")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{cup_pos},1")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{cup_pos},0")
+        await asyncio.sleep(2.0)
+        await client.send_command(f"{lift_pos},0")
+        await client.send_command("180,90,0,0")
+        await asyncio.sleep(2.0)
+
+    def get_stream_generator(self):
+        """
+        Yields multipart JPEG frames for HTTP streaming.
+        """
+        boundary = "frame"
+        while not self.stopped:
+            try:
+                b64_frame = self.frame_queue.get(timeout=2)
+                jpg_bytes = base64.b64decode(b64_frame)
+                yield (
+                    b"--%b\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: %d\r\n\r\n" % (boundary.encode(), len(jpg_bytes))
+                )
+                yield jpg_bytes
+                yield b"\r\n"
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"ShellGame stream generator error: {e}")
+                break
+        print("ShellGame stream generator exiting.")
 
     def __del__(self):
         self.stop()

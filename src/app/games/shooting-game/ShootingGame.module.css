@@ -1,0 +1,124 @@
+.container {
+  padding: 20px;
+  font-family: sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.controlsConfig {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 15px;
+  margin-bottom: 20px;
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+}
+
+.inputGroup {
+  display: flex;
+  flex-direction: column;
+}
+
+.inputGroup label {
+  margin-bottom: 5px;
+  font-size: 0.9em;
+}
+
+.inputGroup input,
+.inputGroup select {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.actionButtons {
+  margin-bottom: 20px;
+  display: flex;
+  gap: 10px;
+}
+
+.actionButtons button {
+  padding: 10px 15px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 1em;
+}
+
+.actionButtons button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+.actionButtons button:not(:disabled) {
+  background-color: #007bff;
+  color: white;
+}
+
+.actionButtons button.emergencyButton:not(:disabled) {
+  background-color: #dc3545;
+}
+
+.statusMessage {
+  margin-bottom: 20px;
+  font-weight: bold;
+  min-height: 1.2em; /* Prevent layout shift */
+}
+
+.videoContainer {
+  display: flex;
+  gap: 20px;
+  width: 100%;
+  max-width: 1300px; /* Adjust as needed */
+  justify-content: space-around;
+  margin-bottom: 20px;
+}
+
+.videoFeed {
+  flex: 1;
+  border: 1px solid #eee;
+  padding: 10px;
+  background-color: #f9f9f9;
+  min-width: 320px; /* Minimum width for feeds */
+}
+
+.videoFeed h2 {
+  margin-top: 0;
+  font-size: 1.2em;
+  text-align: center;
+}
+
+.videoElement {
+  width: 100%;
+  height: auto;
+  max-height: 480px; /* Limit height */
+  background-color: #000;
+  border: 1px solid #ccc;
+}
+
+.noFramePlaceholder {
+  width: 100%;
+  height: 240px; /* Or match expected video height */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #e0e0e0;
+  color: #777;
+  border: 1px solid #ccc;
+}
+
+.gameState {
+  margin-top: 20px;
+  padding: 15px;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  background-color: #f0f0f0;
+  width: 100%;
+  max-width: 600px;
+}
+
+.gameState h2 {
+  margin-top: 0;
+}

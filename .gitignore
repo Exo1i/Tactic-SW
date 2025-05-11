@@ -15,3 +15,4 @@ coverage/
 /backend/games/venv
 /.venv
 /venv
+/backend/games/TargetDetection
