@@ -117,65 +117,57 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str):
             await memory_game_instances[game_id].run_game(websocket)
             return  # Important! Game handles its own lifecycle so we return here
         
-        # Original code for other game types
+        # Generalized config handling for all other games
         game_module = importlib.import_module(module_path)
-        
-        if game_id == "shell-game":
-            # Save singleton for streaming
-            # Pass esp32_client to ShellGame
-            shell_game_session = game_module.ShellGame(esp32_client=esp32_client)
-            game_session = shell_game_session
-        elif game_id == "rubiks":
-            # Wait for initial config message (optional)
-            first_message = await websocket.receive()
-            config = None
-            first_frame_bytes = None
-            if "text" in first_message:
-                try: 
-                    config = json.loads(first_message["text"])
-                    # --- Debug log for IP camera address ---
-                    if config and "ip_camera_url" in config:
-                        print(f"[DEBUG] Received IP camera URL from frontend: {config['ip_camera_url']}")
-                except Exception:
-                    config = None
-            elif "bytes" in first_message:
-                first_frame_bytes = first_message["bytes"]
-            if config is not None:
-                # Pass ESP32 client to the game
-                game_session = RubiksCubeGame(config, esp32_client=esp32_client)
-            else:
-                game_session = RubiksCubeGame(esp32_client=esp32_client)
-        else:
-            # Default: try to receive config as first message, else treat as frame
-            first_message = await websocket.receive()
-            config = None
-            first_frame_bytes = None
-            if "text" in first_message:
-                try:
-                    config = json.loads(first_message["text"])
-                    # --- Debug log for IP camera address ---
-                    if config and "ip_camera_url" in config:
-                        print(f"[DEBUG] Received IP camera URL from frontend: {config['ip_camera_url']}")
-                except Exception:
-                    config = None  # Or treat as command
-            elif "bytes" in first_message:
-                first_frame_bytes = first_message["bytes"]
-            
-            if config is not None:
-                # Pass ESP32 client to the game if the class accepts it
-                try:
+        first_message = await websocket.receive()
+        config = None
+        first_frame_bytes = None
+        if "text" in first_message:
+            try:
+                config = json.loads(first_message["text"])
+                # --- Debug log for IP camera address ---
+                if config and "ip_camera_url" in config:
+                    print(f"[DEBUG] Received IP camera URL from frontend: {config['ip_camera_url']}")
+            except Exception:
+                config = None
+        elif "bytes" in first_message:
+            first_frame_bytes = first_message["bytes"]
+
+        # Instantiate the game session with config if possible
+        if config is not None:
+            # Pass ESP32 client to the game if the class accepts it
+            try:
+                if game_id == "rubiks":
+                    game_session = game_module.RubiksCubeGame(config, esp32_client=esp32_client)
+                else:
                     game_session = game_module.GameSession(config, esp32_client=esp32_client)
-                except TypeError:
+            except TypeError:
+                if game_id == "rubiks":
+                    game_session = game_module.RubiksCubeGame(config)
+                else:
                     game_session = game_module.GameSession(config)
-            else:
-                try:
+        else:
+            try:
+                if game_id == "rubiks":
+                    game_session = game_module.RubiksCubeGame(esp32_client=esp32_client)
+                else:
                     game_session = game_module.GameSession(esp32_client=esp32_client)
-                except TypeError:
+            except TypeError:
+                if game_id == "rubiks":
+                    game_session = game_module.RubiksCubeGame()
+                else:
                     game_session = game_module.GameSession()
 
         # Special handling for Target Shooter: store singleton for streaming
         if game_id == "target-shooter":
             target_shooter_session = game_session
+
+        if game_id == "shell-game":
+            shell_game_session = game_session
+
+        if game_id == "rubiks":
+            # Already handled above, nothing extra needed
+            pass
 
     except Exception as e:
         await websocket.send_json({"status": "error", "message": f"Failed to load or initialize game: {str(e)}"})
