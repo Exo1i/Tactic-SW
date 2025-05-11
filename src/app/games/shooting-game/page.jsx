@@ -126,6 +126,11 @@ const ShootingGamePage = () => {
           target_color: targetColor,
           no_balloon_timeout: parseFloat(noBalloonTimeout),
         };
+        // Add IP camera URL if enabled and present
+        if (useIpCamera && ipCameraAddress) {
+          initialConfig.ip_camera_url = ipCameraAddress;
+        }
+        console.log("[ShootingGame] Sending config to backend:", initialConfig);
         socket.send(JSON.stringify(initialConfig));
         setStatusMessage(
           "Configuration sent. Backend will start streaming frames."

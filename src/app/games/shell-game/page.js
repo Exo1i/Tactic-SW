@@ -67,7 +67,20 @@ export default function ShellGamePage() {
     const ws = new WebSocket(`ws://localhost:8000/ws/${gameId}`);
     wsRef.current = ws;
 
-    ws.onopen = () => setStatus("Connected");
+    ws.onopen = () => {
+      setStatus("Connected");
+      // Send config with IP camera URL if enabled
+      if (
+        appliedCameraSettings.useIpCamera &&
+        appliedCameraSettings.ipCameraAddress
+      ) {
+        const config = {
+          ip_camera_url: appliedCameraSettings.ipCameraAddress,
+        };
+        console.log("[ShellGame] Sending config to backend:", config);
+        ws.send(JSON.stringify(config));
+      }
+    };
     ws.onclose = () => setStatus("Disconnected");
     ws.onerror = () => setStatus("Error");
 

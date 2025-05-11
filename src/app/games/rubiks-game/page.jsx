@@ -210,6 +210,18 @@ export default function RubiksSolverPage() {
         setWsConnectionStatus("Connected");
         if (reconnectTimeout) clearTimeout(reconnectTimeout);
         sendNextFrameRef.current = true; // Ensure sending is enabled on connect
+        // Send config with IP camera URL if enabled
+        const config = {};
+        if (
+          appliedCameraSettings.useIpCamera &&
+          appliedCameraSettings.ipCameraUrl
+        ) {
+          config.ip_camera_url = appliedCameraSettings.ipCameraUrl;
+        }
+        if (Object.keys(config).length > 0) {
+          console.log("[RubiksGame] Sending config to backend:", config);
+          ws.send(JSON.stringify(config));
+        }
       };
 
       ws.onclose = (event) => {

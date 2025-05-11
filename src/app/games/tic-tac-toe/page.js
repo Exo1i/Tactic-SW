@@ -67,7 +67,18 @@ export default function TicTacToePage() {
     ws.onopen = () => {
       setStatus("Connected");
       // Send config as first message
-      ws.send(JSON.stringify(tttArgs));
+      const config = { ...tttArgs };
+      if (
+        appliedCameraSettings.useIpCamera &&
+        appliedCameraSettings.ipCameraAddress
+      ) {
+        config.ip_camera_url = appliedCameraSettings.ipCameraAddress;
+      }
+      // Ensure log is visible in browser console
+      if (typeof window !== "undefined" && window.console) {
+        window.console.log("[TicTacToe] Sending config to backend:", config);
+      }
+      ws.send(JSON.stringify(config));
     };
     ws.onclose = () => setStatus("Disconnected");
     ws.onerror = () => setStatus("Error");

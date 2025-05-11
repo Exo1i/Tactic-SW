@@ -40,22 +40,37 @@ export default function MemoryGame() {
   const [isGameOver, setIsGameOver] = useState(false);
   const [showError, setShowError] = useState(null); // Display errors prominently
   const websocket = useRef(null);
+
+  // Use safe localStorage access for SSR/Node
+  const getInitialIpCameraAddress = () => {
+    if (typeof window !== "undefined" && window.localStorage) {
+      return localStorage.getItem("ipCameraAddress") || "";
+    }
+    return "";
+  };
+  const getInitialUseIpCamera = () => {
+    if (typeof window !== "undefined" && window.localStorage) {
+      return !!localStorage.getItem("ipCameraAddress");
+    }
+    return false;
+  };
+
   const [ipCameraAddress, setIpCameraAddress] = useState(
-    () => localStorage.getItem("ipCameraAddress") || ""
+    getInitialIpCameraAddress
   );
-  const [useIpCamera, setUseIpCamera] = useState(
-    () => !!localStorage.getItem("ipCameraAddress")
-  );
+  const [useIpCamera, setUseIpCamera] = useState(getInitialUseIpCamera);
   const ipInputRef = useRef(null);
   const [showSettings, setShowSettings] = useState(false);
 
   // Save IP to localStorage and update state
   const saveIpCameraAddress = () => {
-    if (useIpCamera && ipCameraAddress) {
-      localStorage.setItem("ipCameraAddress", ipCameraAddress);
-    } else {
-      localStorage.removeItem("ipCameraAddress");
-      setIpCameraAddress("");
+    if (typeof window !== "undefined" && window.localStorage) {
+      if (useIpCamera && ipCameraAddress) {
+        localStorage.setItem("ipCameraAddress", ipCameraAddress);
+      } else {
+        localStorage.removeItem("ipCameraAddress");
+        setIpCameraAddress("");
+      }
     }
     setMessage("Camera settings saved.");
     setShowSettings(false);
@@ -114,7 +129,12 @@ export default function MemoryGame() {
           } game connected. Waiting for start...`
         );
         // Send config message to select mode
-        websocket.current.send(JSON.stringify({ mode: version }));
+        const config = { mode: version };
+        if (useIpCamera && ipCameraAddress) {
+          config.ip_camera_url = ipCameraAddress;
+        }
+        console.log("[MemoryMatching] Sending config to backend:", config);
+        websocket.current.send(JSON.stringify(config));
       };
 
       websocket.current.onclose = (event) => {
