@@ -49,9 +49,13 @@ class GameSession:
             (1, 0): [150,55,155], (1, 1): [130,80,140], 
             (1, 2): [130,105,140], (1, 3): [150,125,155]
         }
-        self.ARM_HOME = [180, 0, 0]
+        self.ARM_HOME = [180, 0, 0] # User's original value
         
-        # Enable/pickup signals
+        # Enable/pickup signals interpretation:
+        # ENABLE_ACTIVE (1): Arm is in a travel phase.
+        # ENABLE_INACTIVE (0): Arm is at a key point for action (pickup/drop) or rest.
+        # PICKUP_TRUE (1): Magnet is ON.
+        # PICKUP_FALSE (0): Magnet is OFF.
         self.ENABLE_ACTIVE = 1
         self.ENABLE_INACTIVE = 0
         self.PICKUP_TRUE = 1
@@ -113,14 +117,15 @@ class GameSession:
             return False
     
     async def move_robot_arm(self, from_pos, to_pos):
-        """Move robot arm to swap pieces between two positions using a temporary position"""
+        """Move robot arm to swap pieces between two positions using a temporary position.
+        Sends commands one by one to the ESP32.
+        """
         if self.esp32_client is None:
             logger.error("No ESP32 client available, skipping robot movement")
             return False
         
         logger.info(f"SWAP OPERATION: Moving piece from {from_pos} to {to_pos}")
         
-        # Get positions
         if from_pos not in self.arm_positions or to_pos not in self.arm_positions:
             logger.error(f"Invalid position: {from_pos} or {to_pos} not in arm_positions")
             return False
@@ -128,101 +133,80 @@ class GameSession:
         from_angles = self.arm_positions[from_pos]
         to_angles = self.arm_positions[to_pos]
         home_angles = self.ARM_HOME
+        temp_position = [90, 0, 120] # Example temporary position
         
-        # Define temporary position for storing the first piece during swap
-        temp_position = [90, 0, 120]  # Similar to arm_temp1 in TestDetection.py
+        move_delay = 2.0  # Time to wait after each command for ESP32 to process and arm to move
         
-        # Debug logs for arm positions
-        logger.info(f"[ARM DEBUG] Source position {from_pos}: {from_angles}")
-        logger.info(f"[ARM DEBUG] Destination position {to_pos}: {to_angles}")
-        logger.info(f"[ARM DEBUG] Home position: {home_angles}")
-        logger.info(f"[ARM DEBUG] Temp position: {temp_position}")
-        
-        move_delay = 2.0  # Time to wait between arm movements
+        sequence_steps = self._generate_swap_sequence_commands(from_pos, to_pos)
         
         try:
-            # Step 1: Move first piece (from from_pos) to temp_position
-            logger.info(f"[ARM DEBUG] Step 1: Moving piece from {from_pos} to temp position {temp_position}")
-            
-            # 1.1: Move to source position (from_pos) and pick up piece
-            logger.info(f"[ARM DEBUG] 1.1: Moving to source {from_pos}: {from_angles} to pick up.")
-            await self.send_command_to_esp32(*from_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
-            await asyncio.sleep(move_delay)
-            
-            # 1.2: Move to home position with piece
-            logger.info(f"[ARM DEBUG] 1.2: Moving to home {home_angles} with piece.")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
-            await asyncio.sleep(move_delay)
-            
-            # 1.3: Move to temp position and release piece
-            logger.info(f"[ARM DEBUG] 1.3: Moving to temp position {temp_position} to release piece.")
-            await self.send_command_to_esp32(*temp_position, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
-            await asyncio.sleep(move_delay)
-            
-            # 1.4: Return to home position (empty)
-            logger.info(f"[ARM DEBUG] 1.4: Returning to home {home_angles} (empty).")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_TRUE)
-            await asyncio.sleep(move_delay)
-            
-            # Step 2: Move second piece (from to_pos) to the first piece's original position (from_pos)
-            logger.info(f"[ARM DEBUG] Step 2: Moving piece from {to_pos} to {from_pos}")
-            
-            # 2.1: Move to second piece's current position (to_pos) and pick up
-            logger.info(f"[ARM DEBUG] 2.1: Moving to source {to_pos}: {to_angles} to pick up.")
-            await self.send_command_to_esp32(*to_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
-            await asyncio.sleep(move_delay)
-            
-            # 2.2: Move to home position with second piece
-            logger.info(f"[ARM DEBUG] 2.2: Moving to home {home_angles} with second piece.")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
-            await asyncio.sleep(move_delay)
-            
-            # 2.3: Move to first piece's original position (from_pos) and release second piece
-            logger.info(f"[ARM DEBUG] 2.3: Moving to destination {from_pos}: {from_angles} to release second piece.")
-            await self.send_command_to_esp32(*from_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
-            await asyncio.sleep(move_delay)
-            
-            # 2.4: Return to home position (empty)
-            logger.info(f"[ARM DEBUG] 2.4: Returning to home {home_angles} (empty).")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_TRUE)
-            await asyncio.sleep(move_delay)
-            
-            # Step 3: Move first piece (from temp_position) to the second piece's original position (to_pos)
-            logger.info(f"[ARM DEBUG] Step 3: Moving piece from temp position {temp_position} to {to_pos}")
-            
-            # 3.1: Move to temp position and pick up first piece
-            logger.info(f"[ARM DEBUG] 3.1: Moving to temp position {temp_position} to pick up first piece.")
-            await self.send_command_to_esp32(*temp_position, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
-            await asyncio.sleep(move_delay)
-            
-            # 3.2: Move to home position with first piece
-            logger.info(f"[ARM DEBUG] 3.2: Moving to home {home_angles} with first piece.")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_TRUE)
-            await asyncio.sleep(move_delay)
-            
-            # 3.3: Move to second piece's original position (to_pos) and release first piece
-            logger.info(f"[ARM DEBUG] 3.3: Moving to destination {to_pos}: {to_angles} to release first piece.")
-            await self.send_command_to_esp32(*to_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
-            await asyncio.sleep(move_delay)
-            
-            # 3.4: Return to home position with magnet off (final state for this swap)
-            logger.info(f"[ARM DEBUG] 3.4: Final return to home {home_angles} (inactive, empty).")
-            await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_TRUE)
-            await asyncio.sleep(move_delay)
+            for step in sequence_steps:
+                logger.info(f"[ARM EXEC] {step['desc']}: Angles {step['angles']}, Enable {step['enable']}, Pickup {step['pickup']}")
+                success = await self.send_command_to_esp32(
+                    step['angles'][0], step['angles'][1], step['angles'][2],
+                    step['enable'], step['pickup']
+                )
+                if not success:
+                    logger.error(f"Failed to send command for step: {step['desc']}. Aborting swap.")
+                    # Attempt to return arm to home on failure
+                    await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE) # Travel home empty
+                    await asyncio.sleep(move_delay)
+                    await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE) # Rest at home empty
+                    return False
+                await asyncio.sleep(move_delay)
             
             logger.info(f"[ARM DEBUG] Swap sequence completed successfully: {from_pos} ⟷ {to_pos}")
             return True
             
         except Exception as e:
             logger.error(f"Error during robot movement: {e}", exc_info=True)
-            # Try to return to home position in case of error
             try:
                 logger.info("[ARM DEBUG] Error occurred - attempting emergency return to home")
+                await self.send_command_to_esp32(*home_angles, self.ENABLE_ACTIVE, self.PICKUP_FALSE)
+                await asyncio.sleep(move_delay)
                 await self.send_command_to_esp32(*home_angles, self.ENABLE_INACTIVE, self.PICKUP_FALSE)
             except Exception as home_error:
                 logger.error(f"Failed to return to home after error: {home_error}")
             return False
-    
+
+    def _generate_swap_sequence_commands(self, from_pos_tuple, to_pos_tuple):
+        """
+        Generates the precise list of arm commands for a swap operation.
+        Each command is a dictionary: {"desc": str, "angles": list, "enable": int, "pickup": int}
+        """
+        from_angles = self.arm_positions[from_pos_tuple]
+        to_angles = self.arm_positions[to_pos_tuple]
+        home_angles = self.ARM_HOME
+        temp_angles = [90, 0, 120] # Consistent temporary position
+
+        commands = []
+
+        # Part 1: Move piece from `from_pos_tuple` to `temp_angles`
+        commands.extend([
+            {"desc": f"Move to {from_pos_tuple} to pick", "angles": from_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": f"Travel to home from {from_pos_tuple} (with piece)", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": f"Move to temp {temp_angles} to release", "angles": temp_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": "Travel to home from temp (empty)", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+        ])
+
+        # Part 2: Move piece from `to_pos_tuple` to `from_pos_tuple`
+        commands.extend([
+            {"desc": f"Move to {to_pos_tuple} to pick", "angles": to_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": f"Travel to home from {to_pos_tuple} (with piece)", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": f"Move to {from_pos_tuple} to release", "angles": from_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": f"Travel to home from {from_pos_tuple} (empty)", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+        ])
+
+        # Part 3: Move piece from `temp_angles` to `to_pos_tuple`
+        commands.extend([
+            {"desc": f"Move to temp {temp_angles} to pick", "angles": temp_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": "Travel to home from temp (with piece)", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
+            {"desc": f"Move to {to_pos_tuple} to release", "angles": to_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": f"Travel to home from {to_pos_tuple} (empty, final)", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
+            {"desc": "Rest at home (final)", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE}, # Ensure arm is stationary and magnet off
+        ])
+        return commands
+
     def find_board_corners(self, frame):
         """Find the four corners of a white board on a black background."""
         if frame is None:
@@ -449,30 +433,7 @@ class GameSession:
         if not self.required_swaps:
             return None
         from_pos, to_pos = self.required_swaps[0]
-        # Angles for the swap sequence (from_pos, to_pos, temp, home)
-        from_angles = self.arm_positions[from_pos]
-        to_angles = self.arm_positions[to_pos]
-        home_angles = self.ARM_HOME
-        temp_position = [90, 0, 120]
-        # The full sequence as a list of dicts (step, angles, enable, pickup)
-        sequence = [
-            # Step 1: from_pos -> temp
-            {"desc": "Pick from source", "angles": from_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
-            {"desc": "Move to temp and release", "angles": temp_position, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Return to home empty", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
-            # Step 2: to_pos -> from_pos
-            {"desc": "Pick from destination", "angles": to_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
-            {"desc": "Move to source and release", "angles": from_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Return to home empty", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
-            # Step 3: temp -> to_pos
-            {"desc": "Pick from temp", "angles": temp_position, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Move to home with piece", "angles": home_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_TRUE},
-            {"desc": "Move to destination and release", "angles": to_angles, "enable": self.ENABLE_ACTIVE, "pickup": self.PICKUP_FALSE},
-            {"desc": "Final return to home", "angles": home_angles, "enable": self.ENABLE_INACTIVE, "pickup": self.PICKUP_TRUE},
-        ]
-        return sequence
+        return self._generate_swap_sequence_commands(from_pos, to_pos)
 
     async def process_frame(self, frame_bytes):
         """Process a frame to detect the board, shapes, and determine necessary moves."""
@@ -585,7 +546,7 @@ class GameSession:
                 "total_swaps": len(self.required_swaps),
                 "next_swap": self.required_swaps[0] if self.required_swaps else None,
                 "current_move": self.current_move,
-                "next_swap_arm_values": self.get_next_swap_arm_values(),  # <--- NEW FIELD
+                "next_swap_arm_values": self.get_next_swap_arm_values(), 
             }
             
             return response
@@ -712,7 +673,7 @@ class GameSession:
                     "total_swaps": len(self.required_swaps),
                     "next_swap": self.required_swaps[0] if self.required_swaps else None,
                     "current_move": self.current_move,
-                    "next_swap_arm_values": self.get_next_swap_arm_values(),  # <--- NEW FIELD
+                    "next_swap_arm_values": self.get_next_swap_arm_values(),
                 }
             
             else:

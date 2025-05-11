@@ -10,7 +10,7 @@ import serial  # Added for serial connection
 import asyncio
 
 # Import memory matching backend for color/yolo WebSocket endpoints
-# from games.rubiks_cube_game import RubiksCubeGame
+# from games.ru biks_cube_game import RubiksCubeGame
 from fastapi.responses import StreamingResponse
 # from games.target_shooter_game import GameSession  # Import GameSession for streaming
 from utils.esp32_client import esp32_client
