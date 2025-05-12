@@ -1406,5 +1406,15 @@ class MemoryMatching:
                     logging.info(f"Released VideoStream for {game_version} during cleanup")
                 except Exception as e:
                     logging.error(f"Error releasing VideoStream for {game_version}: {e}")
+                
+        # Clear any cached frames to release memory
+        async def clean_frame_cache():
+            async with frame_lock:
+                global latest_frame, latest_transformed_frame
+                latest_frame = None
+                latest_transformed_frame = None
+        
+        # Schedule the async cleanup
+        asyncio.create_task(clean_frame_cache())
 
 

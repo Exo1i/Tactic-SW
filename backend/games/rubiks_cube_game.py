@@ -1173,7 +1173,13 @@ class RubiksCubeGame:
         self._reset_solve_state()
         self._reset_scan_state()
         self.stop_requested = False 
-        print(self.status_message)
+        self.current_frame_for_detection = None
+    
+        # Remove websocket reference to prevent memory leaks
+        if hasattr(self, 'websocket'):
+            self.websocket = None
+    
+        print("RubiksCube: Stopped all operations")
     
     def _construct_cube_state_from_scans(self) -> Optional[str]: # This method remains synchronous
         cube_state = [''] * 54

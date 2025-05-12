@@ -575,6 +575,25 @@ class GameSession:
                 self._run_esp32(self.send_command_to_esp32(INIT_PAN, INIT_TILT, shoot_command=False))
                 print("TargetShooter: Sent home command to ESP32 on stop.")
             
+            # Explicitly release video resources if thread join times out
+            if hasattr(self, 'video_stream') and self.video_stream:
+                try:
+                    self.video_stream.release()
+                    print("TargetShooter: Released video stream")
+                except Exception as e:
+                    print(f"TargetShooter: Error releasing video stream: {e}")
+                    
+            # Clear any frame queue if it exists
+            if hasattr(self, 'frame_queue'):
+                try:
+                    while not self.frame_queue.empty():
+                        self.frame_queue.get_nowait()
+                except:
+                    pass
+                    
+            # Clear WebSocket reference to prevent memory leaks
+            self.websocket = None
+
             print("TargetShooter: Stop sequence complete.")
         else:
             print("TargetShooter: Stop already in progress or completed.")
