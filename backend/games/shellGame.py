@@ -290,6 +290,51 @@ class ShellGame:
                 }
 
         success, boxes = self.multi_tracker.update(frame)
+        if self.game_ended:
+            # After game ends, skip all further processing and just return the final state/frames
+            cup_ellipses = []
+            valid_boxes = []
+            for i, (x, y, w, h) in enumerate(boxes):
+                center = (int(x + w/2), int(y + h/2))
+                axes = (int(w/2), int(h/2))
+                angle = 0
+                cup_ellipses.append((center, axes, angle))
+                valid_boxes.append((x, y, w, h))
+            # Encode both frames to base64 JPEG
+            _, raw_jpg = cv2.imencode('.jpg', raw_frame)
+            _, processed_jpg = cv2.imencode('.jpg', frame)
+            raw_b64 = base64.b64encode(raw_jpg).decode("utf-8")
+            processed_b64 = base64.b64encode(processed_jpg).decode("utf-8")
+            resp = {
+                "status": "ended",
+                "ball_position": self.ball_position,
+                "ball_under_cup": self.last_ball_under_cup_idx,
+                "cups": [dict(center=ellipse[0], axes=ellipse[1], angle=ellipse[2]) for ellipse in cup_ellipses],
+                "raw_frame": raw_b64,
+                "processed_frame": processed_b64,
+                "cup_name_result": None,  # Will be set below if available
+            }
+            # Set cup_name_result if it was determined at end
+            if hasattr(self, "latest_debug_state") and self.latest_debug_state.get("cup_name_result"):
+                resp["cup_name_result"] = self.latest_debug_state["cup_name_result"]
+            else:
+                # Try to compute it one last time if not set
+                cup_name_result = None
+                cup_positions = []
+                for i, (x, y, w, h) in enumerate(boxes):
+                    center_x = int(x + w/2)
+                    cup_positions.append((center_x, i))
+                cup_positions_sorted = sorted(cup_positions, key=lambda tup: tup[0])
+                cup_names = ["left", "middle", "right"]
+                idx_to_lr = {i: lr for lr, (_, i) in enumerate(cup_positions_sorted)}
+                detected_cup_idx = self.last_ball_under_cup_idx
+                wantedCup = idx_to_lr.get(detected_cup_idx, -1) if detected_cup_idx is not None else -1
+                if wantedCup in [0, 1, 2]:
+                    cup_name_result = cup_names[wantedCup]
+                resp["cup_name_result"] = cup_name_result
+            self.latest_debug_state = {k: v for k, v in resp.items() if k != "processed_frame"}
+            return resp
+
         if success and not self.game_paused:
             cups_in_frame = [self.check_cup_in_frame(box, frame_width, frame_height) for box in boxes]
             if not all(cups_in_frame):
@@ -464,6 +509,8 @@ class ShellGame:
             # --- Add cup_name_result to debug/game state ---
             "cup_name_result": cup_name_result if self.game_ended else None,
         }
+        # --- Always update latest_debug_state here, so /shell-game/debug is correct ---
+        self.latest_debug_state = {k: v for k, v in resp.items() if k != "processed_frame"}
         return resp
 
     async def send_arm_sequence(self, cup_pos, lift_pos):
