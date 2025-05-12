@@ -22,7 +22,7 @@ from utils.esp32_client import esp32_client as global_esp32_client_instance
 
 # --- Configuration ---
 # SERIAL_PORT and BAUD_RATE are no longer needed
-CAMERA_URL = 'http://192.168.109.185:4747/video' # Primary Camera URL
+CAMERA_URL = 'http://192.168.137.24:4747/video' # Primary Camera URL
 
 YOLO_MODEL_PATH = "./yolov5s.pt" # Or your specific model path
 
@@ -44,7 +44,7 @@ arm_temp2 = [90, 175, 120]
 arm_trash = [140, 0, 140]
 
 # --- Arm Sync Operation Constants ---
-ARM_SYNC_STEP_DELAY = 0.3 # Reduced sleep between successful steps
+ARM_SYNC_STEP_DELAY = 1 # Reduced sleep between successful steps
 
 # --- Retry Constants ---
 ARM_MAX_RETRIES = 10 # Max attempts for a single arm command before failing sequence
