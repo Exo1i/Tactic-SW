@@ -16,7 +16,7 @@ export default function Home() {
     <div className="flex flex-col items-center justify-center min-h-screen gap-10 bg-gradient-to-br from-blue-100 via-white to-yellow-100">
       <div className="flex flex-col items-center gap-2">
         <h1 className="text-4xl sm:text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-purple-600 via-pink-500 to-yellow-500 drop-shadow mb-2">
-          🎮 Welcome to the AI Games Hub!
+          🎮 Welcome to Tactic!
         </h1>
         <p className="text-lg text-gray-700 mb-2 text-center max-w-xl">
           Play with computer vision, robotics, and AI-powered games. Choose a game below and challenge yourself or your friends!
@@ -26,11 +26,10 @@ export default function Home() {
         {games.map((game, idx) => (
           <button
             key={game.id}
-            className={`flex flex-col items-center justify-center px-8 py-8 rounded-2xl shadow-xl bg-white hover:bg-gradient-to-br hover:from-blue-100 hover:to-yellow-100 border-2 border-blue-200 hover:border-yellow-300 transition-all duration-200 transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400 ${
-              idx === games.length - 1 && games.length % 2 === 1
+            className={`flex flex-col items-center justify-center px-8 py-8 rounded-2xl shadow-xl bg-white hover:bg-gradient-to-br hover:from-blue-100 hover:to-yellow-100 border-2 border-blue-200 hover:border-yellow-300 transition-all duration-200 transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-400 ${idx === games.length - 1 && games.length % 2 === 1
                 ? "sm:col-span-2 justify-self-center w-full"
                 : ""
-            }`}
+              }`}
             onClick={() => router.push(`/games/${game.id}`)}
           >
             <span className="text-5xl mb-2">{game.emoji}</span>
@@ -48,7 +47,6 @@ export default function Home() {
       <footer className="mt-10 text-gray-400 text-xs text-center">
         <span>
           Built with <span className="text-pink-400">♥</span> using Next.js, OpenCV, and AI. <br />
-          <span className="text-gray-500">© {new Date().getFullYear()} AI Games Hub</span>
         </span>
       </footer>
     </div>
